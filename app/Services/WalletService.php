@@ -37,27 +37,27 @@ class WalletService
     /**
      * Withdraw money from an account.
      */
-    public function withdraw(string $accountId, int $amount): Transaction
-    {
-        return DB::transaction(function () use ($accountId, $amount) {
-            $account = Account::whereKey($accountId)->lockForUpdate()->firstOrFail();
+   public function withdraw(string $accountId, int $amount): Transaction
+{
+    return DB::transaction(function () use ($accountId, $amount) {
+        // ئەم دێڕە سەتری ئەکاونتەکە قوفڵ دەکات
+        $account = Account::whereKey($accountId)->lockForUpdate()->firstOrFail();
+        //                                       ↑↑↑↑↑↑↑↑↑↑↑↑↑ گرنگترین بەش
 
-            $this->assertActive($account);
+        $balance = Money::of($account->balance, $account->currency);
+        $debit = Money::of($amount, $account->currency);
 
-            $balance = Money::of($account->balance, $account->currency);
-            $debit = Money::of($amount, $account->currency);
+        // باڵانس نابێت ببێتە سالب
+        if ($debit->isGreaterThan($balance)) {
+            throw new InsufficientFundsException();
+        }
 
-            // Balance must never go negative (rule 1)
-            if ($debit->isGreaterThan($balance)) {
-                throw new InsufficientFundsException();
-            }
+        $account->balance = $balance->subtract($debit)->minorUnits;
+        $account->save();
 
-            $account->balance = $balance->subtract($debit)->minorUnits;
-            $account->save();
-
-            return $this->record($account, 'withdrawal', $amount, $account->balance);
-        });
-    }
+        return $this->record($account, 'withdrawal', $amount, $account->balance);
+    });
+}
 
     /**
      * Transfer money between two accounts. Atomic: both legs or neither (rule 2).
