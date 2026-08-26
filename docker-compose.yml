@@ -3,6 +3,8 @@ services:
     build: .
     ports:
       - "8000:8000"
+    volumes:
+      - .:/var/www/html
     depends_on:
       db:
         condition: service_healthy
