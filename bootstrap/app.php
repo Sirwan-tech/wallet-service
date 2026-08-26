@@ -11,8 +11,10 @@ return Application::configure(basePath: dirname(__DIR__))
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
-    ->withMiddleware(function (Middleware $middleware): void {
-        //
+     ->withMiddleware(function (Middleware $middleware): void {
+        $middleware->alias([
+            'idempotency' => \App\Http\Middleware\HandleIdempotency::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->render(function (\App\Exceptions\InsufficientFundsException $e, $request) {

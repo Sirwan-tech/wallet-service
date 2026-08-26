@@ -6,8 +6,11 @@ use Illuminate\Support\Facades\Route;
 
 Route::post('/accounts', [AccountController::class, 'store']);
 Route::get('/accounts/{id}', [AccountController::class, 'show']);
-Route::post('/accounts/{id}/deposits', [AccountController::class, 'deposit']);
-Route::post('/accounts/{id}/withdrawals', [AccountController::class, 'withdraw']);
 Route::get('/accounts/{id}/transactions', [AccountController::class, 'transactions']);
 
-Route::post('/transfers', [TransferController::class, 'store']);
+// Money-moving endpoints require an Idempotency-Key
+Route::middleware('idempotency')->group(function () {
+    Route::post('/accounts/{id}/deposits', [AccountController::class, 'deposit']);
+    Route::post('/accounts/{id}/withdrawals', [AccountController::class, 'withdraw']);
+    Route::post('/transfers', [TransferController::class, 'store']);
+});
