@@ -12,18 +12,28 @@ class AccountController extends Controller
     public function __construct(private WalletService $wallet) {}
 
     // POST /accounts
+
     public function store(Request $request): JsonResponse
     {
+        // Normalize currency to uppercase before validating
+        $request->merge([
+            'currency' => strtoupper((string) $request->input('currency')),
+        ]);
+
+        $allowed = config('wallet.allowed_currencies');
+
         $data = $request->validate([
             'first_name' => ['required', 'string', 'min:2', 'max:255'],
             'last_name'  => ['required', 'string', 'min:2', 'max:255'],
-            'currency'   => ['required', 'string', 'size:3'],
+            'currency'   => ['required', 'string', 'size:3', 'in:' . implode(',', $allowed)],
+        ], [
+            'currency.in' => 'The currency must be one of: ' . implode(', ', $allowed) . '.',
         ]);
 
         $account = Account::create([
             'first_name' => $data['first_name'],
             'last_name'  => $data['last_name'],
-            'currency'   => strtoupper($data['currency']),
+            'currency'   => $data['currency'],
             'balance'    => 0,
             'status'     => 'active',
         ]);
