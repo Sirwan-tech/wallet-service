@@ -33,5 +33,18 @@ services:
       timeout: 5s
       retries: 10
 
+  db_test:
+    image: mysql:8
+    environment:
+      MYSQL_DATABASE: wallet_test
+      MYSQL_ROOT_PASSWORD: secret
+    ports:
+      - "3308:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-psecret"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
 volumes:
   dbdata:
