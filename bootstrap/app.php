@@ -6,15 +6,19 @@ use Illuminate\Foundation\Configuration\Middleware;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
-        web: __DIR__.'/../routes/web.php',
-        api: __DIR__.'/../routes/api.php',
-        commands: __DIR__.'/../routes/console.php',
+        web: __DIR__ . '/../routes/web.php',
+        api: __DIR__ . '/../routes/api.php',
+        commands: __DIR__ . '/../routes/console.php',
         health: '/up',
     )
-     ->withMiddleware(function (Middleware $middleware): void {
+        ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'idempotency' => \App\Http\Middleware\HandleIdempotency::class,
         ]);
+
+        // API requests should never redirect to a login page — return JSON 401 instead
+        $middleware->redirectUsersTo(fn () => null);
+        $middleware->redirectGuestsTo(fn () => null);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->render(function (\App\Exceptions\InsufficientFundsException $e, $request) {
@@ -35,6 +39,14 @@ return Application::configure(basePath: dirname(__DIR__))
             ], 422);
         });
 
+        $exceptions->render(function (\Illuminate\Auth\AuthenticationException $e, $request) {
+            if ($request->is('api/*')) {
+                return response()->json([
+                    'error' => ['code' => 'unauthenticated', 'message' => 'Authentication required. Please provide a valid token.'],
+                ], 401);
+            }
+        });
+
         $exceptions->render(function (\Illuminate\Database\Eloquent\ModelNotFoundException $e, $request) {
             if ($request->is('api/*')) {
                 return response()->json([
@@ -48,7 +60,7 @@ return Application::configure(basePath: dirname(__DIR__))
                 return response()->json([
                     'error' => [
                         'code' => 'validation_failed',
-                        'message' => 'The given data wasinvalid...',
+                        'message' => 'The given data was invalid.',
                         'details' => $e->errors(),
                     ],
                 ], 422);
