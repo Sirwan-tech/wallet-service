@@ -13,9 +13,9 @@ class AccountController extends Controller
 
     // POST /accounts
 
+    // POST /accounts
     public function store(Request $request): JsonResponse
     {
-        // Normalize currency to uppercase before validating
         $request->merge([
             'currency' => strtoupper((string) $request->input('currency')),
         ]);
@@ -25,6 +25,9 @@ class AccountController extends Controller
         $data = $request->validate([
             'first_name' => ['required', 'string', 'min:2', 'max:255'],
             'last_name'  => ['required', 'string', 'min:2', 'max:255'],
+            'email'      => ['required', 'email', 'unique:accounts,email'],
+            'phone'      => ['required', 'string', 'unique:accounts,phone'],
+            'password'   => ['required', 'string', 'min:6'],
             'currency'   => ['required', 'string', 'size:3', 'in:' . implode(',', $allowed)],
         ], [
             'currency.in' => 'The currency must be one of: ' . implode(', ', $allowed) . '.',
@@ -33,6 +36,9 @@ class AccountController extends Controller
         $account = Account::create([
             'first_name' => $data['first_name'],
             'last_name'  => $data['last_name'],
+            'email'      => $data['email'],
+            'phone'      => $data['phone'],
+            'password'   => $data['password'],
             'currency'   => $data['currency'],
             'balance'    => 0,
             'status'     => 'active',
@@ -84,13 +90,15 @@ class AccountController extends Controller
         return response()->json($transactions);
     }
 
-    private function present(Account $account): array
+      private function present(Account $account): array
     {
         return [
             'id'         => $account->id,
             'owner_name' => $account->owner_name,
             'first_name' => $account->first_name,
             'last_name'  => $account->last_name,
+            'email'      => $account->email,
+            'phone'      => $account->phone,
             'currency'   => $account->currency,
             'balance'    => $account->balance,
             'status'     => $account->status,

@@ -3,12 +3,13 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Foundation\Auth\User as Authenticatable;
+use Laravel\Sanctum\HasApiTokens;
 
-class Account extends Model
+class Account extends Authenticatable
 {
-    use HasUuids;
+    use HasUuids, HasApiTokens;
 
     protected $keyType = 'string';
     public $incrementing = false;
@@ -16,13 +17,21 @@ class Account extends Model
     protected $fillable = [
         'first_name',
         'last_name',
+        'email',
+        'phone',
+        'password',
         'currency',
         'balance',
         'status',
     ];
 
+    protected $hidden = [
+        'password',
+    ];
+
     protected $casts = [
         'balance' => 'integer',
+        'password' => 'hashed',
     ];
 
     public function transactions(): HasMany
@@ -30,7 +39,6 @@ class Account extends Model
         return $this->hasMany(Transaction::class);
     }
 
-    // Friendly full name for API responses
     public function getOwnerNameAttribute(): string
     {
         return trim("{$this->first_name} {$this->last_name}");
