@@ -30,6 +30,13 @@
         <env name="DB_DATABASE" value="wallet_test" force="true"/>
         <env name="DB_USERNAME" value="root" force="true"/>
         <env name="DB_PASSWORD" value="secret" force="true"/>
+        <server name="APP_KEY" value="base64:e78joS1vEgZOq8qSQe1A/1o22wpCCekWhQUuqmDzuzw="/>
+        <server name="DB_CONNECTION" value="mysql"/>
+        <server name="DB_HOST" value="db_test"/>
+        <server name="DB_PORT" value="3306"/>
+        <server name="DB_DATABASE" value="wallet_test"/>
+        <server name="DB_USERNAME" value="root"/>
+        <server name="DB_PASSWORD" value="secret"/>
         <env name="DB_URL" value=""/>
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>

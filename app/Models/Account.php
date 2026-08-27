@@ -6,10 +6,11 @@ use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Laravel\Sanctum\HasApiTokens;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 
 class Account extends Authenticatable
 {
-    use HasUuids, HasApiTokens;
+        use HasUuids, HasApiTokens, HasFactory;
 
     protected $keyType = 'string';
     public $incrementing = false;
