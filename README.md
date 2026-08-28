@@ -57,7 +57,7 @@ docker compose up -d --wait db_test
 docker compose run --rm app php artisan test
 ```
 
-**63 tests, all passing.** They run against a real MySQL 8 database in a
+**67 tests, all passing.** They run against a real MySQL 8 database in a
 dedicated `db_test` container, from a clean checkout, with no seeded data and no
 dependence on execution order. See [TESTING.md](TESTING.md) for the plan, the
 manual test session, and the open defects.
@@ -109,7 +109,7 @@ Every response uses `application/json`. Errors use a single envelope:
 | 200 | A read, or a successful login |
 | 400 | `Idempotency-Key` header missing on a money endpoint |
 | 401 | No token, an invalid token, or bad credentials |
-| 403 | The account is frozen |
+| 403 | The account is not yours, or the account is frozen |
 | 404 | No such account |
 | 409 | An `Idempotency-Key` was reused with a different payload |
 | 422 | Validation failed, insufficient funds, or a currency mismatch |
@@ -200,11 +200,13 @@ and it cost more than time:
   a USD and a EUR wallet;
 - `Account` extends the framework's `Authenticatable`, which welds the domain
   model to the framework;
-- and it introduced **BUG-07**: `auth:sanctum` proves identity but nothing
-  authorises the request, so any account holder can read and drain any other
-  account. Verified by hand — see MT-22 and MT-23 in TESTING.md.
+- and it introduced **BUG-07**: `auth:sanctum` proved identity but nothing
+  authorised the request, so any account holder could read and drain any other
+  account. Found by hand — see MT-22 and MT-23 in TESTING.md — and fixed before
+  submission with an ownership guard on every account route.
 
-The first item on the list below is to remove it.
+Fixing the hole made the service safe. Removing the layer would make it
+*correct*, and that is still the first item on the list below.
 
 **4. A `frozen` account state exists but is unreachable.** No endpoint can set
 it. It is dead code from the same excursion, and it should be removed rather
@@ -214,19 +216,30 @@ than finished.
 
 ## Known defects
 
-The service is not defect-free, and TESTING.md documents all fourteen with
-reproduction steps and severity reasoning rather than leaving them for a
-reviewer to find. The ones that matter:
+The service is not defect-free. TESTING.md documents all fourteen defects with
+reproduction steps and severity reasoning rather than leaving them for a reviewer
+to find. **Five were found and fixed before submission; nine remain open.**
+
+**Found and fixed late**
+
+| ID | Severity | What it was |
+|---|---|---|
+| BUG-04 / BUG-05 | Critical | An idempotency key was fingerprinted from the request **body alone**, so the same key on a different account or a different endpoint replayed the wrong stored response and the money silently never moved. The fingerprint now covers method + path + body |
+| BUG-07 | Critical | No ownership check — any authenticated caller could read and drain any account. Every account route now compares the caller against the target and answers `403 forbidden` |
+| BUG-03 | High | `?per_page=-1` produced a MySQL syntax error and a 500. The page size is now clamped on both sides, reading its bounds from `config/wallet.php` |
+| BUG-11 | Medium | "Newest first" had no tiebreaker, so pagination could duplicate or skip rows. The query now orders by `created_at` then `id` |
+
+**Still open — the ones that matter**
 
 | ID | Severity | Summary |
 |---|---|---|
-| BUG-04 / BUG-05 | Critical | An idempotency key is fingerprinted from the request **body alone**, so the same key on a different account or a different endpoint replays the wrong stored response and the money silently never moves |
-| BUG-07 | Critical | No ownership check: any authenticated caller can read and drain any account |
 | BUG-08 | High | The idempotency guard is a non-atomic check-then-insert, so concurrent same-key requests can both apply (found by inspection, **not** reproduced under load) |
-| BUG-03 | High | `?per_page=-1` produces a MySQL syntax error and a 500 |
+| BUG-06 | Medium | A key whose first use returned 4xx is never recorded, so it can be reused with a different payload instead of conflicting |
+| BUG-02 / BUG-09 | Medium | 404, 405 and unhandled 500 responses escape the JSON error envelope; a plain `curl` to an unknown route receives HTML |
+| BUG-10 | Medium | `amount` has no upper bound, so an overflowing deposit answers 500 instead of 422 |
 
-Six of the fourteen are pinned by tests that assert the current behaviour, with
-a docblock naming the bug and the fix, so that correcting them is a visible,
+Three of the open defects are pinned by tests that assert the current behaviour,
+with a docblock naming the bug and the fix, so that correcting them is a visible,
 deliberate change rather than a silent one.
 
 ---
@@ -256,9 +269,11 @@ with no nginx or php-fpm configuration, but it also means concurrency cannot be
 demonstrated over HTTP — which is why the concurrency tests drive the service
 layer in parallel processes instead, and why BUG-08 could not be reproduced.
 
-**The pagination bounds are hardcoded in the controller.** `config/wallet.php`
-declares 20 and 100, but `AccountController` does not read it. The config is
-currently decorative.
+**Authentication was kept rather than removed.** Fixing BUG-07 made the
+authorization boundary real, but the layer itself should not exist — it was out
+of scope. Removing it this late would have invalidated a large part of the test
+suite for no gain the specification asked for, so it stays, documented, as a
+deviation rather than a feature.
 
 ---
 
@@ -266,28 +281,30 @@ currently decorative.
 
 In this order, because this is the order in which the risk falls.
 
-1. **Remove the authentication extension.** It closes BUG-07, restores the
-   specification's create-account payload, and removes the unique email/phone
-   constraint that stops one owner holding two currencies. One deletion fixes
-   four separate problems.
-2. **Make idempotency correct.** Fingerprint the method and path alongside the
-   body, scope the record to the caller, and reserve the key *inside* the same
+1. **Remove the authentication extension.** It restores the specification's
+   create-account payload (BUG-14) and removes the unique email/phone constraint
+   that stops one owner holding two currencies. BUG-07 is already closed, but
+   one deletion would make the whole boundary unnecessary rather than merely
+   correct.
+2. **Close the last idempotency gap.** Reserve the key *inside* the same
    transaction as the money movement so a concurrent retry loses on the unique
-   index instead of double-applying. Add `UNIQUE(account_id, idempotency_key)` on
-   `transactions` as a ledger-level backstop — the column already exists and is
-   never written. Then rewrite the pinned tests to assert 409.
-3. **Extract the balance rule into a pure function** over
-   `(balanceMinor, amountMinor, currency)`, so rule 1 is unit-testable with no
-   database and `WalletService` becomes a thin persistence shell around it.
+   index instead of double-applying (BUG-08), and record failed attempts so a
+   used key cannot come back with a different payload (BUG-06). Add
+   `UNIQUE(account_id, idempotency_key)` on `transactions` as a ledger-level
+   backstop — the column already exists and is never written.
+3. **Serve behind php-fpm and nginx**, so concurrency can be demonstrated over
+   real HTTP and BUG-08 can be *proved* rather than reasoned about. This is the
+   only remaining finding I could not reproduce, and it is the reason.
 4. **Close the error contract.** A catch-all renderer so 404, 405, 500 and
    malformed bodies all use the same envelope, and retype the not-found renderer
-   which is currently dead code.
-5. **Fix the edges the tests already name:** clamp `per_page`, add an ordering
-   tiebreaker on `id` so "newest first" is a total order, bound `amount` and
-   guard `Money::add` against overflow, and shape the history response like every
-   other endpoint.
-6. **Serve behind php-fpm and nginx**, so concurrency can be demonstrated over
-   real HTTP and BUG-08 can be proved rather than reasoned about.
+   which is currently dead code (BUG-02, BUG-09).
+5. **Extract the balance rule into a pure function** over
+   `(balanceMinor, amountMinor, currency)`, so rule 1 is unit-testable with no
+   database and `WalletService` becomes a thin persistence shell around it. Today
+   only `Money` meets the specification's "testable without a live database" bar.
+6. **Bound `amount` and guard `Money::add` against overflow** (BUG-10), route
+   `add`/`subtract` through `of()` so the value object defends its own invariant
+   (BUG-01), and shape the history response like every other endpoint (BUG-12).
 7. **Give idempotency keys a lifetime** — a retention window and an explicit
    rejection of keys older than it, instead of an unbounded table.
 

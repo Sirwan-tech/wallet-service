@@ -32,16 +32,22 @@ and `$_ENV`, while Laravel reads `$_SERVER` first, so the container's own
 `DB_HOST=db` won. The fix was matching `<server>` entries in `phpunit.xml`; the
 guard makes a regression loud instead of destructive.
 
-**Current state: 63 tests, 63 passing.**
+**Current state: 67 tests, 67 passing.**
 
 | Suite | File | Tests | What it covers |
 |---|---|---:|---|
 | Unit | `tests/Unit/MoneyTest.php` | 17 | The `Money` value object — no Laravel, no database |
 | Feature | `tests/Feature/WalletServiceTest.php` | 4 | The balance rule at the service layer |
-| Feature | `tests/Feature/AccountApiTest.php` | 22 | Create / read / deposit / withdraw / history over HTTP |
-| Feature | `tests/Feature/TransferApiTest.php` | 9 | Transfers, atomicity, the currency rule |
-| Feature | `tests/Feature/IdempotencyTest.php` | 8 | Rule 4, plus three pinned defects |
+| Feature | `tests/Feature/AccountApiTest.php` | 25 | Create / read / deposit / withdraw / history / ownership over HTTP |
+| Feature | `tests/Feature/TransferApiTest.php` | 10 | Transfers, atomicity, the currency rule, ownership |
+| Feature | `tests/Feature/IdempotencyTest.php` | 8 | Rule 4, plus one remaining pinned defect |
 | Feature | `tests/Feature/ConcurrencyTest.php` | 3 | Rule 7, under real parallel load |
+
+Five of the defects in section 4 were **found by these tests and by the manual
+session, and then fixed** before submission: BUG-03, BUG-04, BUG-05, BUG-07 and
+BUG-11. Their reports are kept in full, with a Fixed note, because how a defect
+was found matters more than the diff that closed it. Nine remain open and are
+documented as such.
 
 ---
 
@@ -58,7 +64,7 @@ and put the testing effort in that order.
 | 2 | **A retry applying an operation twice** | Network retries are routine; a double debit is a customer-visible loss the client cannot detect. | `IdempotencyTest` |
 | 3 | **A partial transfer** | One leg without the other corrupts the ledger permanently; every later reconciliation is wrong. | `TransferApiTest` — a rejected transfer must record *neither* leg |
 | 4 | **A negative balance** | The core invariant of the product. Cheap to test, catastrophic to miss. | `MoneyTest`, `WalletServiceTest`, `AccountApiTest` |
-| 5 | **Authorization** | Any authenticated caller can move anyone's money (BUG-07). This ranks below the ledger risks only because authentication was out of scope to begin with. | Not automated — found by hand, MT-22/MT-23 |
+| 5 | **Authorization** | Any authenticated caller could read and drain any account (BUG-07) until it was fixed. This ranks below the ledger risks only because authentication was out of scope to begin with. | Found by hand (MT-22, MT-23); now covered by four tests |
 | 6 | **Error contract drift** | A client that cannot tell "insufficient funds" from "server exploded" will retry the wrong things. | `AccountApiTest`, `TransferApiTest` |
 | 7 | Pagination correctness | Wrong page boundaries mislead a human reading a statement, but no money moves. | `AccountApiTest` |
 
@@ -102,11 +108,12 @@ result is stable.
 
 ### 2.4 What I consciously did NOT automate, and why
 
-- **Ownership / authorization (BUG-07).** Found by hand and reproduced reliably
-  (MT-22, MT-23), but I did not write a test asserting the current broken
-  behaviour. Such a test would have to be deleted the moment it is fixed, and
-  unlike the idempotency defects this is not a subtle interaction worth
-  pinning — it is a missing check. Written up in full instead.
+- **Ownership / authorization (BUG-07) — was not automated, now is.** I
+  found this by hand (MT-22, MT-23) and deliberately did *not* write a test
+  pinning the broken behaviour: unlike the idempotency defects it is not a
+  subtle interaction worth preserving, it is a missing check. Once it was fixed
+  the four tests that belong there were written, asserting 403 on reading,
+  withdrawing from, listing, and transferring out of somebody else’s account.
 - **The idempotency race under concurrency (BUG-08).** I can describe the exact
   interleaving from the code, but proving it needs concurrent requests through
   the full HTTP middleware stack, and the container serves with a single-worker
@@ -186,6 +193,20 @@ compound: Alice first took 100 from Bob, then Bob's own 10000 deposit was
 silently swallowed — his balance went from 2500 to 2400 across two responses
 that both said "success".
 
+**Since this session, five of the nine failures have been fixed.** The table
+above is left exactly as recorded on 2026-08-28, because it is the evidence that
+found them. Re-running those cases today gives:
+
+| ID | Then | Now |
+|---|---|---|
+| MT-20 | 500, MySQL error 1064 | 200; the page size falls back to the configured default of 20 |
+| MT-22 | 200 — Bob’s details returned to Alice | 403 `forbidden` |
+| MT-23 | 201 — 100 debited from Bob | 403 `forbidden`, nothing moves |
+| MT-24 | 201 carrying Alice’s record | 409 `idempotency_conflict` |
+| MT-25 | Bob’s 10000 silently vanished | n/a — the request is now refused before it can vanish |
+
+MT-02, MT-21, MT-26 and MT-27 still fail and are still reported below.
+
 ---
 
 ## 4. Bug reports
@@ -201,20 +222,20 @@ wrong person. **High** — a stated requirement demonstrably does not hold.
 
 | ID | Title | Severity | Status |
 |---|---|---|---|
-| BUG-04 | Idempotency key scoped to the body alone — a second account's deposit is silently swallowed | Critical | Not fixed, pinned by a test |
-| BUG-05 | The same key across two endpoints swallows the opposite operation | Critical | Not fixed, pinned by a test |
-| BUG-07 | No ownership check — any authenticated caller can read and drain any account | Critical | Not fixed |
-| BUG-03 | `per_page=-1` crashes the history endpoint with a MySQL syntax error | High | Not fixed, pinned by a test |
-| BUG-08 | The idempotency guard is a non-atomic check-then-insert | High | Not fixed, **not reproduced** |
-| BUG-02 | 404 responses escape the error envelope and leak internals | Medium | Not fixed, pinned by a test |
-| BUG-06 | A key whose first use failed becomes reusable with a different payload | Medium | Not fixed, pinned by a test |
-| BUG-09 | Framework errors (unknown route, wrong method) escape the JSON contract | Medium | Not fixed |
-| BUG-10 | `amount` has no upper bound, so a large deposit returns 500 | Medium | Not fixed |
-| BUG-11 | "Newest first" is not a deterministic order | Medium | Not fixed |
+| BUG-04 | Idempotency key scoped to the body alone — a second account's deposit is silently swallowed | Critical | **Fixed late** |
+| BUG-05 | The same key across two endpoints swallows the opposite operation | Critical | **Fixed late** |
+| BUG-07 | No ownership check — any authenticated caller can read and drain any account | Critical | **Fixed late** |
+| BUG-03 | `per_page=-1` crashes the history endpoint with a MySQL syntax error | High | **Fixed late** |
+| BUG-08 | The idempotency guard is a non-atomic check-then-insert | High | Open, **not reproduced** |
+| BUG-02 | 404 responses escape the error envelope and leak internals | Medium | Open, pinned by a test |
+| BUG-06 | A key whose first use failed becomes reusable with a different payload | Medium | Open, pinned by a test |
+| BUG-09 | Framework errors (unknown route, wrong method) escape the JSON contract | Medium | Open |
+| BUG-10 | `amount` has no upper bound, so a large deposit returns 500 | Medium | Open |
+| BUG-11 | "Newest first" is not a deterministic order | Medium | **Fixed late** |
 | BUG-14 | `POST /accounts` rejects the payload the specification defines | Medium | Deliberate deviation |
-| BUG-01 | `Money::add()`/`subtract()` bypass the non-negative guard | Low | Not fixed, pinned by a test |
-| BUG-12 | The history response is shaped unlike every other endpoint, and leaks a column | Low | Not fixed |
-| BUG-13 | `withdraw()` is the only money path that skips the frozen check | Low | Not fixed |
+| BUG-01 | `Money::add()`/`subtract()` bypass the non-negative guard | Low | Open, pinned by a test |
+| BUG-12 | The history response is shaped unlike every other endpoint, and leaks a column | Low | Open |
+| BUG-13 | `withdraw()` is the only money path that skips the frozen check | Low | Open |
 
 ---
 
@@ -272,7 +293,7 @@ unknown routes and therefore partly addresses BUG-09.
 ---
 
 ### BUG-03 — `per_page=-1` crashes the transaction history endpoint
-**Severity: High.** *Not fixed.*
+**Severity: High.** *Found by manual testing (MT-20), **fixed late**.*
 
 **Steps to reproduce**
 1. Create an account and give it at least one transaction.
@@ -302,16 +323,25 @@ behaviour and says so, because the suite is pinned to MySQL.
 **Severity reasoning.** High rather than critical because no money moves and no
 data is exposed — but it is trivially reachable by any client, it answers a
 plain client mistake with a server error, and with debug on it leaks the schema
-and absolute file paths. Pinned by
-`AccountApiTest::test_a_negative_page_size_currently_crashes_the_history_endpoint`.
+and absolute file paths.
 
-**Fix.** `max(1, min((int) $request->query('per_page', 20), 100))`, or validate
-`per_page` as `integer|min:1|max:100`.
+**Fixed.** `AccountController::transactions` now reads the bounds from
+`config/wallet.php` — which until then was declared but never used — and falls
+back to the configured default for any value that is not a positive integer:
+
+```php
+$perPage = (int) $request->query('per_page', $default);
+$perPage = $perPage > 0 ? min($perPage, $max) : $default;
+```
+
+`AccountApiTest::test_an_invalid_page_size_falls_back_to_the_configured_default`
+now asserts 200 with `per_page` 20 for `-1`, `0` and `abc`, and
+`test_transaction_history_caps_the_page_size` still asserts the 100 ceiling.
 
 ---
 
 ### BUG-04 — An idempotency key is scoped to the request body alone, so a second account's deposit is silently swallowed
-**Severity: Critical.** *Not fixed.*
+**Severity: Critical.** *Found by manual testing (MT-24, MT-25), **fixed late**.*
 
 **Steps to reproduce**
 1. As ALICE: `POST /api/accounts/{ALICE}/deposits`, body `{"amount":10000}`,
@@ -340,21 +370,39 @@ client believes moved and did not, with a `201` and a plausible body to prove
 it. It needs no attacker and no race — two ordinary clients that happen to
 generate the same key string, or one client reusing a key across accounts, are
 enough. Reconciliation cannot detect it, because the ledger stays internally
-consistent. Pinned by
-`IdempotencyTest::test_the_same_key_on_a_different_account_currently_swallows_the_deposit`.
+consistent.
 
-**Fix.** Include the method and path in the fingerprint, and scope the row to
-the caller:
+**Fixed.** The fingerprint now identifies the *operation*, not just the payload
+(`HandleIdempotency.php`):
+
 ```php
-$requestHash = hash('sha256', $request->method().'|'.$request->path().'|'.$request->getContent());
+$requestHash = hash('sha256', implode('|', [
+    $request->method(),
+    $request->path(),
+    $request->getContent(),
+]));
 ```
-A mismatch then produces the 409 the rule already specifies.
+
+A genuine replay — same method, same path, same body — still returns the
+original result, and a key reused against a different account is now the 409
+conflict rule 4 requires.
+`IdempotencyTest::test_the_same_key_on_a_different_account_is_rejected_as_a_conflict`
+asserts the conflict and that neither account moved.
+
+*What is still not done:* the stored row is not scoped to the authenticated
+caller. In practice two callers can no longer reach the same fingerprint — the
+account id is in the path for deposits and withdrawals and in the body for
+transfers, and BUG-07's ownership check now stops anyone acting on an account
+that is not theirs — so the residual risk is a spurious 409 between two clients
+that generate the same key string, never lost money. Scoping the row to the
+caller would remove even that.
 
 ---
 
 ### BUG-05 — An idempotency key shared across two endpoints swallows the opposite operation
-**Severity: Critical.** *Not fixed.* Same root cause as BUG-04, reported
-separately because it fails in a different direction.
+**Severity: Critical.** *Found while writing the idempotency tests, **fixed
+late**.* Same root cause as BUG-04, reported separately because it failed in a
+different direction.
 
 **Steps to reproduce**
 1. `POST /api/accounts/{X}/deposits` `{"amount":10000}` with key `k`. → 201.
@@ -370,8 +418,13 @@ is never debited.
 **Severity reasoning.** Critical for the same reason as BUG-04, and slightly
 more insidious: the returned body says `deposit` while the caller asked for a
 withdrawal, so even a client that inspects the response is more likely to be
-confused than alerted. Pinned by
-`IdempotencyTest::test_the_same_key_on_a_different_endpoint_currently_swallows_the_withdrawal`.
+confused than alerted.
+
+**Fixed** by the same change as BUG-04 — the path is now part of the
+fingerprint, so `/deposits` and `/withdrawals` can never be replays of one
+another.
+`IdempotencyTest::test_the_same_key_on_a_different_endpoint_is_rejected_as_a_conflict`
+asserts 409 and that the balance is untouched.
 
 ---
 
@@ -406,7 +459,7 @@ still be recorded so the conflict check keeps working.
 ---
 
 ### BUG-07 — No ownership check: any authenticated caller can read and drain any account
-**Severity: Critical.** *Not fixed.*
+**Severity: Critical.** *Found by manual testing (MT-22, MT-23), **fixed late**.*
 
 **Steps to reproduce**
 1. Create ALICE and BOB. Log in as ALICE and take her token.
@@ -434,11 +487,34 @@ no authentication at all, because the presence of a login endpoint invites a
 reader to assume a boundary exists where there is none. It also discloses third
 parties' personal data (email, phone).
 
-**Fix.** Either remove the authentication layer entirely — it is listed as out
-of scope, so removing it costs nothing and closes this hole — or compare
-`$request->user()->getKey()` against the `{id}` in every account route and
-`abort(403)` on a mismatch, and force `from_account_id` to the authenticated
-account in `TransferController`.
+**Fixed.** A single guard in `AccountController`, applied to `show`, `deposit`,
+`withdraw` and `transactions`:
+
+```php
+private function assertOwns(Request $request, string $id): void
+{
+    if ($request->user()->getKey() !== $id) {
+        throw new NotAccountOwnerException();
+    }
+}
+```
+
+`TransferController` applies the same check to `from_account_id`, and the new
+`App\Exceptions\NotAccountOwnerException` is rendered as
+`403 {"error":{"code":"forbidden", ...}}` so the refusal uses the same envelope
+as every other error. Four tests cover it: reading, listing, withdrawing from,
+and transferring out of somebody else's account.
+
+**Ordering note, chosen deliberately.** `show` and `transactions` look the
+account up first, so an unknown id still answers 404. The money endpoints check
+ownership *before* the lookup, so an unknown id answers 403 — no existence
+oracle on the endpoints that move money.
+
+**The better fix, not taken.** Removing the authentication layer altogether
+would have closed this and BUG-14 at once, and authentication was out of scope
+to begin with. I kept it because removing it this late would have invalidated a
+large part of the test suite for no gain the specification asked for. That is a
+trade-off, not an endorsement — see Q2.
 
 ---
 
@@ -542,7 +618,8 @@ front of it does.
 ---
 
 ### BUG-11 — "Newest first" is not a deterministic order
-**Severity: Medium.** *Not fixed.*
+**Severity: Medium.** *Found by reading the query against the column type,
+**fixed late**.*
 
 **Description.** `AccountController::transactions` orders by `created_at` alone,
 and `transactions.created_at` is a MySQL `timestamp` with second precision.
@@ -560,9 +637,22 @@ lost. Hard to observe by hand, which is exactly why it is worth writing down —
 the automated ordering test only passes reliably because it stamps its three
 deposits a minute apart with `travelTo()`.
 
-**Fix.** Add a tiebreaker: `->orderByDesc('created_at')->orderByDesc('id')`. The
-ids are ordered UUIDs, so this is chronological. Raising the column to
-`timestamp(6)` would help but does not remove the need for a tiebreaker.
+**Fixed.** The query now carries a tiebreaker:
+
+```php
+->orderByDesc('created_at')->orderByDesc('id')
+```
+
+`HasUuids` generates ordered UUIDs, so descending `id` is chronological and the
+sort key is now total. Raising the column to `timestamp(6)` would narrow the
+window of ties but would not remove the need for a tiebreaker, so it was not
+worth a migration.
+
+*Honest caveat:* this fix is reasoned from the id generation strategy, not
+proven by a test. Writing a test that fails without the tiebreaker would mean
+provoking a tie and then relying on the storage engine to return the rows in a
+particular wrong order — which is exactly the non-determinism being fixed. The
+existing ordering test still stamps its rows a minute apart with `travelTo()`.
 
 ---
 
@@ -664,9 +754,10 @@ why the base path is stated at the top of the README.
 **Q4. "Define a sane default and maximum page size." What are they?**
 *Assumption:* default 20, maximum 100. *Why:* a statement page a human reads is
 around 20 rows; 100 bounds the worst-case response without needing a cursor.
-*Known problem:* the values are declared in `config/wallet.php` but the
-controller hardcodes them, so the config is currently dead — and the bounds are
-not enforced on the low side at all (BUG-03).
+*Was a problem, now fixed:* the values were declared in `config/wallet.php` but
+the controller hardcoded them, so the config was dead — and the bounds were not
+enforced on the low side at all, which is BUG-03. The controller now reads both
+values from the config and clamps on both sides.
 
 **Q5. Should a request that fails consume its idempotency key?**
 *Assumption as built:* no — only 2xx responses are recorded. *Why this is
@@ -735,18 +826,45 @@ unmentioned.
 
 ---
 
-## 6. If I had another day
+## 6. What was fixed, and what I would do next
 
-In this order, because this is the order in which the risk falls:
+### Fixed before submission
 
-1. Delete the authentication extension. It closes BUG-07, un-breaks the
-   specification's create-account payload (BUG-14), and removes the unique
-   email/phone constraint that stops one owner holding two currencies.
-2. Fix the idempotency fingerprint (BUG-04, BUG-05) and move the key reservation
-   inside the money transaction (BUG-08), then rewrite the three pinned tests to
-   assert 409 instead of the current behaviour.
-3. Clamp `per_page` (BUG-03) and add the ordering tiebreaker (BUG-11).
-4. Add a catch-all error renderer (BUG-02, BUG-09).
-5. Extract the balance rule out of `WalletService` into a pure function so rule 1
-   can be unit-tested without a database, as the specification asks. Today only
-   `Money` meets that bar.
+Five defects were found by the tests and by the manual session, and then closed.
+The reports above are kept in full rather than deleted, because how a defect was
+found is more informative than the diff that closed it.
+
+| ID | Fix | Now covered by |
+|---|---|---|
+| BUG-04, BUG-05 | The idempotency fingerprint covers method + path + body, not the body alone | 2 tests asserting 409 |
+| BUG-07 | An ownership guard on every account route and on `from_account_id`, rendered as `403 forbidden` | 4 tests |
+| BUG-03 | `per_page` clamped on both sides, reading the bounds from `config/wallet.php` | 2 tests |
+| BUG-11 | `orderByDesc('id')` as a tiebreaker, so "newest first" is a total order | reasoned, not tested — see the report |
+
+### What I would do next, in this order
+
+The order follows the risk, not the effort.
+
+1. **Delete the authentication extension.** It was out of scope, it caused
+   BUG-07, and it is why the specification's own create-account payload is
+   rejected (BUG-14) and why one owner cannot hold two currencies. Fixing the
+   authorization hole made the service safe; removing the layer would make it
+   correct.
+2. **Close the remaining idempotency gap (BUG-08).** Reserve the key *before*
+   `$next()`, inside the same transaction as the money movement, so a concurrent
+   retry loses on the unique index instead of double-applying. Add
+   `UNIQUE(account_id, idempotency_key)` on `transactions` as a ledger-level
+   backstop — the column already exists and is never written (BUG-12). Then
+   build the in-process HTTP-kernel harness that would let the race be *proved*
+   rather than reasoned about.
+3. **Record failed attempts (BUG-06)** so a key whose first use returned 422
+   cannot be reused with a different payload.
+4. **Add a catch-all error renderer (BUG-02, BUG-09)** so 404, 405, 500 and
+   malformed bodies all speak the same envelope, and retype the not-found
+   renderer, which is currently dead code.
+5. **Extract the balance rule out of `WalletService`** into a pure function over
+   `(balanceMinor, amountMinor, currency)`, so rule 1 is unit-testable without a
+   database as the specification asks. Today only `Money` meets that bar.
+6. **Bound `amount` and guard `Money::add` against overflow (BUG-10, BUG-01)**,
+   and route `add`/`subtract` through `of()` so the value object defends its own
+   invariant.
