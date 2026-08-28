@@ -8,6 +8,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      db_test:
+        condition: service_healthy
     environment:
       DB_CONNECTION: mysql
       DB_HOST: db
