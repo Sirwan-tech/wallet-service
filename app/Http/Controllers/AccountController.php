@@ -7,6 +7,7 @@ use App\Models\Account;
 use App\Services\WalletService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rules\Password;
 
 class AccountController extends Controller
 {
@@ -21,15 +22,27 @@ class AccountController extends Controller
 
         $allowed = config('wallet.allowed_currencies');
 
+        // Names are plain text, never markup. The Unicode-aware rule keeps
+        // Kurdish and other international names valid while rejecting HTML.
+        $nameRules = ['required', 'string', 'min:2', 'max:100', "regex:/^[\\p{L}\\p{M}\\s'-]+$/u"];
+
         $data = $request->validate([
-            'first_name' => ['required', 'string', 'min:2', 'max:255'],
-            'last_name'  => ['required', 'string', 'min:2', 'max:255'],
-            'email'      => ['required', 'email', 'unique:accounts,email'],
-            'phone'      => ['required', 'string', 'unique:accounts,phone'],
-            'password'   => ['required', 'string', 'min:6'],
+            'first_name' => $nameRules,
+            'last_name'  => $nameRules,
+            'email'      => ['required', 'string', 'email:rfc', 'max:254', 'unique:accounts,email'],
+            'phone'      => ['required', 'string', 'regex:/^\\+[1-9][0-9]{7,14}$/', 'unique:accounts,phone'],
+            'password'   => [
+                'required',
+                'string',
+                'max:1024',
+                Password::min(12)->mixedCase()->numbers()->symbols(),
+            ],
             'currency'   => ['required', 'string', 'size:3', 'in:' . implode(',', $allowed)],
         ], [
             'currency.in' => 'The currency must be one of: ' . implode(', ', $allowed) . '.',
+            'first_name.regex' => 'The first name may contain only letters, spaces, apostrophes, and hyphens.',
+            'last_name.regex' => 'The last name may contain only letters, spaces, apostrophes, and hyphens.',
+            'phone.regex' => 'The phone number must be in E.164 format.',
         ]);
 
         $account = Account::create([
@@ -62,7 +75,7 @@ class AccountController extends Controller
         $this->assertOwns($request, $id);
 
         $data = $request->validate([
-            'amount' => ['required', 'integer', 'min:1'],
+            'amount' => ['bail', 'required', 'integer', 'min:1', 'max:' . config('wallet.max_amount_minor')],
         ]);
 
         $tx = $this->wallet->deposit($id, $data['amount']);
@@ -76,7 +89,7 @@ class AccountController extends Controller
         $this->assertOwns($request, $id);
 
         $data = $request->validate([
-            'amount' => ['required', 'integer', 'min:1'],
+            'amount' => ['bail', 'required', 'integer', 'min:1', 'max:' . config('wallet.max_amount_minor')],
         ]);
 
         $tx = $this->wallet->withdraw($id, $data['amount']);

@@ -26,13 +26,23 @@ final class Money
     public function add(Money $other): self
     {
         $this->assertSameCurrency($other);
-        return new self($this->minorUnits + $other->minorUnits, $this->currency);
+
+        if ($other->minorUnits > PHP_INT_MAX - $this->minorUnits) {
+            throw new InvalidArgumentException('Amount exceeds the supported range.');
+        }
+
+        return self::of($this->minorUnits + $other->minorUnits, $this->currency);
     }
 
     public function subtract(Money $other): self
     {
         $this->assertSameCurrency($other);
-        return new self($this->minorUnits - $other->minorUnits, $this->currency);
+
+        if ($other->minorUnits > $this->minorUnits) {
+            throw new InvalidArgumentException('Amount cannot be negative.');
+        }
+
+        return self::of($this->minorUnits - $other->minorUnits, $this->currency);
     }
 
     public function isGreaterThan(Money $other): bool

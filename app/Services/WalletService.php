@@ -13,13 +13,12 @@ use Illuminate\Support\Str;
 
 class WalletService
 {
-    /**
-     * Deposit money into an account.
-     */
+    /** Credit an account and record the operation atomically. */
     public function deposit(string $accountId, int $amount): Transaction
     {
+        $this->assertValidAmount($amount);
+
         return DB::transaction(function () use ($accountId, $amount) {
-            // Lock the account row so concurrent requests wait (rule 7)
             $account = Account::whereKey($accountId)->lockForUpdate()->firstOrFail();
 
             $this->assertActive($account);
@@ -31,60 +30,70 @@ class WalletService
             $account->save();
 
             return $this->record($account, 'deposit', $amount, $account->balance);
-        });
+        }, attempts: 3);
+    }
+
+    /** Debit an account without allowing a negative balance. */
+    public function withdraw(string $accountId, int $amount): Transaction
+    {
+        $this->assertValidAmount($amount);
+
+        return DB::transaction(function () use ($accountId, $amount) {
+            $account = Account::whereKey($accountId)->lockForUpdate()->firstOrFail();
+
+            $this->assertActive($account);
+
+            $balance = Money::of($account->balance, $account->currency);
+            $debit = Money::of($amount, $account->currency);
+
+            if ($debit->isGreaterThan($balance)) {
+                throw new InsufficientFundsException();
+            }
+
+            $account->balance = $balance->subtract($debit)->minorUnits;
+            $account->save();
+
+            return $this->record($account, 'withdrawal', $amount, $account->balance);
+        }, attempts: 3);
     }
 
     /**
-     * Withdraw money from an account.
-     */
-   public function withdraw(string $accountId, int $amount): Transaction
-{
-    return DB::transaction(function () use ($accountId, $amount) {
-        // ئەم دێڕە سەتری ئەکاونتەکە قوفڵ دەکات
-        $account = Account::whereKey($accountId)->lockForUpdate()->firstOrFail();
-        //                                       ↑↑↑↑↑↑↑↑↑↑↑↑↑ گرنگترین بەش
-
-        $balance = Money::of($account->balance, $account->currency);
-        $debit = Money::of($amount, $account->currency);
-
-        // باڵانس نابێت ببێتە سالب
-        if ($debit->isGreaterThan($balance)) {
-            throw new InsufficientFundsException();
-        }
-
-        $account->balance = $balance->subtract($debit)->minorUnits;
-        $account->save();
-
-        return $this->record($account, 'withdrawal', $amount, $account->balance);
-    });
-}
-
-    /**
-     * Transfer money between two accounts. Atomic: both legs or neither (rule 2).
+     * Move money between accounts. Both balance changes and both ledger legs
+     * either commit together or roll back together.
+     *
+     * @return array{out: Transaction, in: Transaction, transfer_id: string}
      */
     public function transfer(string $fromId, string $toId, int $amount): array
     {
+        $this->assertValidAmount($amount);
+
         if ($fromId === $toId) {
             throw new \InvalidArgumentException('Cannot transfer to the same account.');
         }
 
         return DB::transaction(function () use ($fromId, $toId, $amount) {
-            // Lock both accounts in a consistent order to avoid deadlocks
+            // Acquire locks one row at a time in one explicit order. A single
+            // whereIn query does not promise that MySQL will lock in that order.
             $ids = [$fromId, $toId];
-            sort($ids);
-            $locked = Account::whereIn('id', $ids)->lockForUpdate()->get()->keyBy('id');
+            sort($ids, SORT_STRING);
 
-            $from = $locked->get($fromId);
-            $to = $locked->get($toId);
+            $locked = [];
+            foreach ($ids as $id) {
+                $account = Account::whereKey($id)->lockForUpdate()->first();
 
-            if (!$from || !$to) {
-                throw new \Illuminate\Database\Eloquent\ModelNotFoundException();
+                if (!$account) {
+                    throw new \Illuminate\Database\Eloquent\ModelNotFoundException();
+                }
+
+                $locked[$id] = $account;
             }
+
+            $from = $locked[$fromId];
+            $to = $locked[$toId];
 
             $this->assertActive($from);
             $this->assertActive($to);
 
-            // Same currency only (rule 3)
             if ($from->currency !== $to->currency) {
                 throw new CurrencyMismatchException($from->currency, $to->currency);
             }
@@ -96,7 +105,6 @@ class WalletService
                 throw new InsufficientFundsException();
             }
 
-            // Both legs share one transfer_id so you can see they belong together
             $transferId = (string) Str::uuid();
 
             $from->balance = $fromBalance->subtract($debit)->minorUnits;
@@ -108,13 +116,22 @@ class WalletService
             $in = $this->record($to, 'transfer_in', $amount, $to->balance, $transferId);
 
             return ['out' => $out, 'in' => $in, 'transfer_id' => $transferId];
-        });
+        }, attempts: 3);
     }
 
     private function assertActive(Account $account): void
     {
         if ($account->isFrozen()) {
             throw new AccountFrozenException();
+        }
+    }
+
+    private function assertValidAmount(int $amount): void
+    {
+        $maximum = (int) config('wallet.max_amount_minor');
+
+        if ($amount < 1 || $amount > $maximum) {
+            throw new \InvalidArgumentException("Amount must be between 1 and {$maximum} minor units.");
         }
     }
 

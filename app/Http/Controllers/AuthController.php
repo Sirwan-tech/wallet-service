@@ -13,13 +13,15 @@ class AuthController extends Controller
     public function login(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'login'    => ['required', 'string'], // email OR phone
-            'password' => ['required', 'string'],
+            'login'    => ['required', 'string', 'max:254'], // email OR phone
+            'password' => ['required', 'string', 'max:1024'],
         ]);
 
+        $login = trim($data['login']);
+
         // Find the account by email or phone
-        $account = Account::where('email', $data['login'])
-            ->orWhere('phone', $data['login'])
+        $account = Account::where('email', $login)
+            ->orWhere('phone', $login)
             ->first();
 
         // Check account exists and password is correct
@@ -43,7 +45,7 @@ class AuthController extends Controller
         }
 
         // Issue a Sanctum token
-        $token = $account->createToken('api-token')->plainTextToken;
+        $token = $account->createToken('wallet-api', ['wallet:read', 'wallet:write'])->plainTextToken;
 
         return response()->json([
             'token' => $token,

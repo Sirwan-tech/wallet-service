@@ -15,9 +15,9 @@ class TransferController extends Controller
     public function store(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'from_account_id' => ['required', 'string'],
-            'to_account_id'   => ['required', 'string', 'different:from_account_id'],
-            'amount'          => ['required', 'integer', 'min:1'],
+            'from_account_id' => ['bail', 'required', 'uuid'],
+            'to_account_id'   => ['bail', 'required', 'uuid', 'different:from_account_id'],
+            'amount'          => ['bail', 'required', 'integer', 'min:1', 'max:' . config('wallet.max_amount_minor')],
         ]);
 
         // The token proves identity; it does not authorise moving somebody

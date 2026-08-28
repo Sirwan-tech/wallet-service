@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use LogicException;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -30,6 +31,14 @@ class Transaction extends Model
         'amount' => 'integer',
         'balance_after' => 'integer',
     ];
+
+    protected static function booted(): void
+    {
+        // The application treats this as an append-only ledger. Database
+        // privileges should enforce the same rule in a production deployment.
+        static::updating(fn () => throw new LogicException('Transaction records are immutable.'));
+        static::deleting(fn () => throw new LogicException('Transaction records are immutable.'));
+    }
 
     public function account(): BelongsTo
     {
