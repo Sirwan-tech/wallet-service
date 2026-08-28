@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Exceptions\NotAccountOwnerException;
 use App\Services\WalletService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -18,6 +19,12 @@ class TransferController extends Controller
             'to_account_id'   => ['required', 'string', 'different:from_account_id'],
             'amount'          => ['required', 'integer', 'min:1'],
         ]);
+
+        // The token proves identity; it does not authorise moving somebody
+        // else's money (TESTING.md, BUG-07).
+        if ($request->user()->getKey() !== $data['from_account_id']) {
+            throw new NotAccountOwnerException();
+        }
 
         $result = $this->wallet->transfer(
             $data['from_account_id'],

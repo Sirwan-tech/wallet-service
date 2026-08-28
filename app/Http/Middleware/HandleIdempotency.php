@@ -23,8 +23,15 @@ class HandleIdempotency
             ], 400);
         }
 
-        // Hash the request body so we can detect "same key, different payload"
-        $requestHash = hash('sha256', $request->getContent());
+        // The fingerprint must identify the OPERATION, not just the payload.
+        // Body alone meant that the same key on a different account or a
+        // different endpoint replayed the wrong stored response and the money
+        // silently never moved (TESTING.md, BUG-04 and BUG-05).
+        $requestHash = hash('sha256', implode('|', [
+            $request->method(),
+            $request->path(),
+            $request->getContent(),
+        ]));
 
         // Look for an existing record with this key
         $existing = IdempotencyKey::where('idempotency_key', $key)->first();

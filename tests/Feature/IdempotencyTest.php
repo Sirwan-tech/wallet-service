@@ -15,8 +15,10 @@ use Tests\TestCase;
  * conflict.
  *
  * The first five tests prove the rule holds for the case it was designed for.
- * The last three pin real defects found while writing them; each is reported
- * in TESTING.md and each will need its assertions rewritten once fixed.
+ * The next two cover BUG-04 and BUG-05, which these tests found and which are
+ * now fixed: a key is fingerprinted by method, path and body rather than by
+ * body alone. The last one still pins BUG-06, which is reported in TESTING.md
+ * and not fixed.
  */
 class IdempotencyTest extends TestCase
 {
@@ -139,57 +141,41 @@ class IdempotencyTest extends TestCase
     // ------------------------------------------------------ defects found
 
     /**
-     * KNOWN BUG (TESTING.md, BUG-04) - the most serious defect in this service.
-     *
-     * HandleIdempotency fingerprints the request body alone:
-     *     $requestHash = hash('sha256', $request->getContent());
-     * The HTTP method, the path and the {id} route parameter are not part of
-     * the key's identity, and the stored row is not scoped to a caller. Two
-     * deposits of the same amount into DIFFERENT accounts therefore look like
-     * a replay of one another.
-     *
-     * Consequence: account B's deposit is answered 201 with account A's
-     * transaction record while B is never credited. The caller is told the
-     * money moved; it did not.
-     *
-     * Fix: hash method + path + body (and scope the row to the caller), so a
-     * mismatch is the 409 conflict rule 4 requires.
+     * FIXED (TESTING.md, BUG-04). The fingerprint now covers the HTTP method
+     * and the path, not just the body, so a key reused against a DIFFERENT
+     * account is the 409 conflict rule 4 requires rather than a replay that
+     * silently swallowed the deposit and answered 201.
      */
-    public function test_the_same_key_on_a_different_account_currently_swallows_the_deposit(): void
+    public function test_the_same_key_on_a_different_account_is_rejected_as_a_conflict(): void
     {
         $a = Account::factory()->create();
         $b = Account::factory()->create();
         $key = $this->key();
 
         Sanctum::actingAs($a);
-        $first = $this->withHeader('Idempotency-Key', $key)
-            ->postJson("/api/accounts/{$a->id}/deposits", ['amount' => 10000]);
-        $first->assertStatus(201);
+        $this->withHeader('Idempotency-Key', $key)
+            ->postJson("/api/accounts/{$a->id}/deposits", ['amount' => 10000])
+            ->assertStatus(201);
 
         Sanctum::actingAs($b);
-        $second = $this->withHeader('Idempotency-Key', $key)
-            ->postJson("/api/accounts/{$b->id}/deposits", ['amount' => 10000]);
+        $this->withHeader('Idempotency-Key', $key)
+            ->postJson("/api/accounts/{$b->id}/deposits", ['amount' => 10000])
+            ->assertStatus(409)
+            ->assertJsonPath('error.code', 'idempotency_conflict');
 
-        // What a correct implementation would do: 409, or credit B.
-        // What actually happens: A's record is replayed to B.
-        $second->assertStatus(201)
-            ->assertJsonPath('account_id', $a->id)
-            ->assertJsonPath('id', $first->json('id'));
-
+        // Neither account is silently short-changed: A keeps its deposit and
+        // B is told to retry with a key of its own.
         $this->assertSame(10000, $a->fresh()->balance);
         $this->assertSame(0, $b->fresh()->balance);
         $this->assertDatabaseCount('transactions', 1);
     }
 
     /**
-     * KNOWN BUG (TESTING.md, BUG-05) - same root cause as BUG-04.
-     *
-     * A deposit and a withdrawal of the same amount have byte-identical
-     * bodies, so under one key the withdrawal is treated as a replay of the
-     * deposit: the caller receives 201 with type "deposit" and the account is
-     * never debited.
+     * FIXED (TESTING.md, BUG-05) - same fix as BUG-04. A withdrawal is no
+     * longer mistaken for a replay of a deposit that happened to serialise to
+     * the same bytes, because the path is part of the fingerprint.
      */
-    public function test_the_same_key_on_a_different_endpoint_currently_swallows_the_withdrawal(): void
+    public function test_the_same_key_on_a_different_endpoint_is_rejected_as_a_conflict(): void
     {
         $account = Account::factory()->create();
         Sanctum::actingAs($account);
@@ -201,10 +187,9 @@ class IdempotencyTest extends TestCase
 
         $this->withHeader('Idempotency-Key', $key)
             ->postJson("/api/accounts/{$account->id}/withdrawals", ['amount' => 10000])
-            ->assertStatus(201)
-            ->assertJsonPath('type', 'deposit');
+            ->assertStatus(409)
+            ->assertJsonPath('error.code', 'idempotency_conflict');
 
-        // The withdrawal never happened.
         $this->assertSame(10000, $account->fresh()->balance);
         $this->assertDatabaseCount('transactions', 1);
     }

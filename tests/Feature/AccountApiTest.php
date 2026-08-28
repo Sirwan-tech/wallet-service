@@ -285,30 +285,70 @@ class AccountApiTest extends TestCase
     }
 
     /**
-     * KNOWN GAP (TESTING.md, BUG-03): per_page is never validated. A negative
-     * value survives min($perPage, 100). Laravel's limit() silently discards a
-     * negative limit, but forPage() still emits offset(0), so the query becomes
-     * "... order by created_at desc offset 0" with no LIMIT - which MySQL
-     * rejects with error 1064. No render callback matches QueryException, so
-     * the endpoint answers 500 with no error envelope.
-     *
-     * The one-line fix is max(1, min((int) $request->query('per_page', 20), 100))
-     * in AccountController::transactions, or validating per_page as
-     * integer|min:1|max:100. This test pins the current behaviour so that the
-     * fix is a deliberate, visible change.
+     * FIXED (TESTING.md, BUG-03). per_page is now clamped. An invalid value
+     * falls back to the configured default instead of reaching paginate() as a
+     * negative number, where Laravel discards the negative LIMIT but still
+     * emits offset(0) - a bare SQL OFFSET that MySQL rejects with error 1064,
+     * so the endpoint used to answer 500.
      */
-    public function test_a_negative_page_size_currently_crashes_the_history_endpoint(): void
+    public function test_an_invalid_page_size_falls_back_to_the_configured_default(): void
     {
         $account = Account::factory()->create();
         Sanctum::actingAs($account);
-
-        // Required: with an empty history paginate() short-circuits and never
-        // builds the offending query.
         $this->threeDepositsOneMinuteApart($account);
 
-        $response = $this->getJson("/api/accounts/{$account->id}/transactions?per_page=-1");
+        foreach (['-1', '0', 'abc'] as $value) {
+            $this->getJson("/api/accounts/{$account->id}/transactions?per_page={$value}")
+                ->assertStatus(200)
+                ->assertJsonPath('per_page', 20)
+                ->assertJsonCount(3, 'data');
+        }
+    }
 
-        $response->assertStatus(500);
-        $this->assertNull($response->json('error.code'));
+    // ------------------------------------------------------- authorization
+
+    /**
+     * A bearer token proves who the caller is; on its own it authorises
+     * nothing. These three cover BUG-07, which was found by hand and is now
+     * fixed - before the fix every one of them returned 200 or 201.
+     */
+    public function test_a_caller_cannot_read_another_accounts_details(): void
+    {
+        $alice = Account::factory()->create();
+        $bob = Account::factory()->withBalance(5000)->create();
+
+        Sanctum::actingAs($alice);
+
+        $this->getJson("/api/accounts/{$bob->id}")
+            ->assertStatus(403)
+            ->assertJsonPath('error.code', 'forbidden');
+    }
+
+    public function test_a_caller_cannot_withdraw_from_another_account(): void
+    {
+        $alice = Account::factory()->create();
+        $bob = Account::factory()->withBalance(5000)->create();
+
+        Sanctum::actingAs($alice);
+
+        $this->withHeader('Idempotency-Key', $this->key())
+            ->postJson("/api/accounts/{$bob->id}/withdrawals", ['amount' => 100])
+            ->assertStatus(403)
+            ->assertJsonPath('error.code', 'forbidden');
+
+        $this->assertSame(5000, $bob->fresh()->balance);
+        $this->assertDatabaseCount('transactions', 0);
+    }
+
+    public function test_a_caller_cannot_read_another_accounts_history(): void
+    {
+        $alice = Account::factory()->create();
+        $bob = Account::factory()->create();
+
+        Sanctum::actingAs($alice);
+
+        $this->getJson("/api/accounts/{$bob->id}/transactions")
+            ->assertStatus(403)
+            ->assertJsonPath('error.code', 'forbidden');
     }
 }

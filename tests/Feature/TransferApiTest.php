@@ -186,4 +186,28 @@ class TransferApiTest extends TestCase
 
         $this->assertDatabaseCount('transactions', 0);
     }
+
+    /**
+     * BUG-07, transfer leg. from_account_id arrives in the request body, so
+     * without an ownership check any token could drain any account.
+     */
+    public function test_a_caller_cannot_transfer_out_of_another_account(): void
+    {
+        $alice = Account::factory()->create();
+        $bob = Account::factory()->withBalance(10000)->create();
+
+        Sanctum::actingAs($alice);
+
+        $this->transfer([
+            'from_account_id' => $bob->id,
+            'to_account_id'   => $alice->id,
+            'amount'          => 5000,
+        ])
+            ->assertStatus(403)
+            ->assertJsonPath('error.code', 'forbidden');
+
+        $this->assertSame(10000, $bob->fresh()->balance);
+        $this->assertSame(0, $alice->fresh()->balance);
+        $this->assertDatabaseCount('transactions', 0);
+    }
 }

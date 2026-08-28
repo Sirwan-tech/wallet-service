@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Exceptions\NotAccountOwnerException;
 use App\Models\Account;
 use App\Services\WalletService;
 use Illuminate\Http\JsonResponse;
@@ -10,8 +11,6 @@ use Illuminate\Http\Request;
 class AccountController extends Controller
 {
     public function __construct(private WalletService $wallet) {}
-
-    // POST /accounts
 
     // POST /accounts
     public function store(Request $request): JsonResponse
@@ -48,31 +47,40 @@ class AccountController extends Controller
     }
 
     // GET /accounts/{id}
-    public function show(string $id): JsonResponse
+    public function show(Request $request, string $id): JsonResponse
     {
         $account = Account::findOrFail($id);
+
+        $this->assertOwns($request, $account->id);
+
         return response()->json($this->present($account));
     }
 
     // POST /accounts/{id}/deposits
     public function deposit(Request $request, string $id): JsonResponse
     {
+        $this->assertOwns($request, $id);
+
         $data = $request->validate([
             'amount' => ['required', 'integer', 'min:1'],
         ]);
 
         $tx = $this->wallet->deposit($id, $data['amount']);
+
         return response()->json($this->presentTx($tx), 201);
     }
 
     // POST /accounts/{id}/withdrawals
     public function withdraw(Request $request, string $id): JsonResponse
     {
+        $this->assertOwns($request, $id);
+
         $data = $request->validate([
             'amount' => ['required', 'integer', 'min:1'],
         ]);
 
         $tx = $this->wallet->withdraw($id, $data['amount']);
+
         return response()->json($this->presentTx($tx), 201);
     }
 
@@ -81,16 +89,38 @@ class AccountController extends Controller
     {
         $account = Account::findOrFail($id);
 
-        $perPage = min((int) $request->query('per_page', 20), 100); // default 20, max 100
+        $this->assertOwns($request, $account->id);
+
+        // Page size: fall back to the configured default for a missing, zero,
+        // negative or non-numeric value, then clamp to the configured maximum.
+        // Without the lower bound a negative value produced a bare SQL OFFSET
+        // with no LIMIT, which MySQL rejects (TESTING.md, BUG-03).
+        $default = (int) config('wallet.pagination.default_per_page');
+        $max = (int) config('wallet.pagination.max_per_page');
+
+        $perPage = (int) $request->query('per_page', $default);
+        $perPage = $perPage > 0 ? min($perPage, $max) : $default;
 
         $transactions = $account->transactions()
             ->orderByDesc('created_at')
+            ->orderByDesc('id')   // stable tiebreaker: ids are ordered UUIDs (TESTING.md, BUG-11)
             ->paginate($perPage);
 
         return response()->json($transactions);
     }
 
-      private function present(Account $account): array
+    /**
+     * A bearer token proves who the caller is. It does not authorise them to
+     * act on somebody else's account (TESTING.md, BUG-07).
+     */
+    private function assertOwns(Request $request, string $id): void
+    {
+        if ($request->user()->getKey() !== $id) {
+            throw new NotAccountOwnerException();
+        }
+    }
+
+    private function present(Account $account): array
     {
         return [
             'id'         => $account->id,
