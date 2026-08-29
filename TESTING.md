@@ -32,7 +32,7 @@ and `$_ENV`, while Laravel reads `$_SERVER` first, so the container's own
 `DB_HOST=db` won. The fix was matching `<server>` entries in `phpunit.xml`; the
 guard makes a regression loud instead of destructive.
 
-**Current state: 71 tests, 71 passing, 275 assertions.**
+**Current state: 72 tests, 72 passing, 286 assertions.**
 
 | Suite | File | Tests | What it covers |
 |---|---|---:|---|
@@ -155,6 +155,13 @@ receives, whether a stack trace leaks, whether the specification's own example
 payload is accepted, and whether one user can reach another user's data. Those
 are exploratory questions — the value is in *noticing*, not in re-running.
 
+Four of them stopped being exploratory the moment they found something. The
+plain-curl question became
+`AccountApiTest::test_an_unknown_route_answers_json_not_html`, the wrong-verb
+question became `test_a_wrong_http_method_answers_405_in_the_error_envelope`,
+and the cross-account questions became the four ownership tests. Manual testing
+found them; automated testing keeps them found.
+
 Section 3 is a real session against the running service, executed on
 2026-08-28 with `docker compose up -d`. The "actual" column is copied from the
 responses, not from expectation.
@@ -167,6 +174,12 @@ responses, not from expectation.
 (Windows 11); app container `php:8.3-fpm` serving `http://localhost:8000`;
 MySQL 8 (`db`, schema `wallet`); `APP_DEBUG=true`; client `curl 8.12.1`.
 All paths sit under the `/api` prefix.
+
+**A note on replaying this session:** the middleware now requires an
+`Idempotency-Key` of 8 to 255 characters from `A-Za-z0-9._:-`. The session below
+used shorter strings such as `k-dep`; only the literals would need lengthening
+to replay it today, and none of the recorded results depended on the key's
+length. Account creation is also rate limited to ten a minute per IP.
 
 **Common preconditions:** three accounts created at the start of the session —
 `ALICE` (USD), `BOB` (USD), `EVA` (EUR), all starting at 0 — and bearer tokens
@@ -257,9 +270,13 @@ wrong person. **High** — a stated requirement demonstrably does not hold.
 | BUG-12 | The history response is shaped unlike every other endpoint, and leaks a column | Low | **Open** |
 | BUG-13 | `withdraw()` is the only money path that skips the frozen check | Low | **Fixed late** |
 
-Every "Fixed late" row is now covered by a test that asserts the corrected
-behaviour, so the fix cannot silently regress. The two open rows are a cosmetic
-inconsistency and a decision, not defects that were left unattended.
+Most "Fixed late" rows are covered by a test that asserts the corrected
+behaviour, so those fixes cannot silently regress. Three are not, and each
+report says why: BUG-08 (the race needs an HTTP harness this container cannot
+provide), BUG-11 (a test would have to provoke a tie and then rely on the very
+non-determinism being fixed) and BUG-13 (the frozen state is unreachable over
+the API). The two open rows are a cosmetic inconsistency and a decision, not
+defects left unattended.
 
 ---
 
@@ -280,7 +297,7 @@ construct through the private constructor directly, so the guard never runs.
 because `WalletService` compares the debit against the balance *before*
 subtracting. But the value object does not defend its own invariant, so the
 safety of the system rests on every caller remembering to check first. Pinned by
-`MoneyTest::test_subtract_currently_produces_a_negative_money_bypassing_the_of_guard`.
+`MoneyTest::test_subtract_refuses_to_produce_a_negative_money`.
 
 **Fix.** Route `add()` and `subtract()` through `self::of()`, and either use
 `isNegative()` or delete it.
@@ -317,7 +334,7 @@ client still behaves correctly, but the documented contract is not met, the
 internal model class is disclosed, and with `APP_DEBUG=true` a full stack trace
 including absolute paths is returned. Every not-found path is affected — read,
 deposit, withdraw, and transfers to an unknown account. Pinned by
-`AccountApiTest::test_an_unknown_account_returns_404_but_not_the_error_envelope`.
+`AccountApiTest::test_an_unknown_account_returns_404_in_the_error_envelope`.
 
 **Fix.** Type the callback on `NotFoundHttpException` instead, which also covers
 unknown routes and therefore partly addresses BUG-09.
@@ -430,13 +447,11 @@ conflict rule 4 requires.
 `IdempotencyTest::test_the_same_key_on_a_different_account_is_rejected_as_a_conflict`
 asserts the conflict and that neither account moved.
 
-*What is still not done:* the stored row is not scoped to the authenticated
-caller. In practice two callers can no longer reach the same fingerprint — the
-account id is in the path for deposits and withdrawals and in the body for
-transfers, and BUG-07's ownership check now stops anyone acting on an account
-that is not theirs — so the residual risk is a spurious 409 between two clients
-that generate the same key string, never lost money. Scoping the row to the
-caller would remove even that.
+The fingerprint also carries the authenticated principal, so a second caller
+using the same key is recognised as a different request and receives a 409
+instead of replaying the first caller's response. The database key remains
+globally unique, so two callers that happen to generate the same key still
+conflict; this is an availability limitation, not a money-loss path.
 
 ---
 
@@ -491,7 +506,7 @@ state change, then a retry with an altered payload. But the realistic version is
 ordinary: a client times out on a request that in fact returned 422, retries
 with an adjusted amount under the same key, and moves money it believed had been
 rejected. Pinned by
-`IdempotencyTest::test_a_key_whose_first_use_failed_is_currently_reusable_with_a_different_payload`.
+`IdempotencyTest::test_a_key_whose_first_use_failed_is_recorded_and_cannot_be_reused`.
 
 **Fix.** Persist the outcome of every terminal response, not just 2xx. If failed
 attempts should stay retryable that is defensible, but the key and hash must
@@ -851,10 +866,14 @@ enforced on the low side at all, which is BUG-03. The controller now reads both
 values from the config and clamps on both sides.
 
 **Q5. Should a request that fails consume its idempotency key?**
-*Assumption as built:* no — only 2xx responses are recorded. *Why this is
-probably wrong:* rule 4 says a key reused with a *different payload* must
-conflict, and that guarantee cannot hold for a key the service has forgotten
-(BUG-06). I would record every terminal outcome and mark failures replayable.
+*Assumption as built:* yes for a terminal client error, no for a server error.
+A response below 500 is recorded and replayed verbatim, so a key reused with a
+different payload conflicts even when the first attempt failed. A 5xx is not
+cached at all: it rolls the reservation and any wallet mutation back together,
+leaving the key genuinely retryable.
+*Why:* rule 4's different-payload guarantee cannot hold for an outcome the
+service has forgotten, while a server error carries no result a client should be
+pinned to. The first build recorded only 2xx responses; that was BUG-06.
 
 **Q6. How long should idempotency keys be retained?**
 *Assumption:* forever; there is no expiry and no cleanup job. *Why:* the spec is
@@ -904,9 +923,12 @@ the original result, and changing the status on replay would make the response
 depend on delivery history.
 
 **Q13. What is the maximum amount the service should accept?**
-*Assumption:* none was set, which turned out to be wrong (BUG-10). A real answer
-needs a product decision; a defensible default is 10^15 minor units, comfortably
-inside `bigint` and outside any legitimate transaction.
+*Assumption as first built:* none was set, which turned out to be wrong
+(BUG-10). A ceiling of 10^12 minor units now ships as
+`WALLET_MAX_AMOUNT_MINOR`, enforced on every amount and overridable per
+deployment. It sits far inside `bigint` and far outside any legitimate
+transaction, so an overflow can no longer be reached through the API. The real
+answer is still a product decision rather than an engineering one.
 
 **Q14. Should a rejected request consume anything observable — a rate limit, an
 audit row?**

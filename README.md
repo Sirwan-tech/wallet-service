@@ -40,7 +40,8 @@ curl -X POST http://localhost:8000/api/login \
 ```bash
 curl -X POST http://localhost:8000/api/accounts/{id}/deposits \
   -H 'Content-Type: application/json' -H 'Accept: application/json' \
-  -H 'Authorization: Bearer {token}' -H 'Idempotency-Key: 4f1b-…' \
+  -H 'Authorization: Bearer {token}' \
+  -H 'Idempotency-Key: 4f1b8c2e-7a91-4d3b-9f60-2c5ea18d7b04' \
   -d '{"amount":10000}'
 ```
 
@@ -62,7 +63,7 @@ docker compose up -d --wait db_test
 docker compose run --rm app php artisan test
 ```
 
-**71 tests, all passing.** They run against a real MySQL 8 database in a
+**72 tests, all passing.** They run against a real MySQL 8 database in a
 dedicated `db_test` container, from a clean checkout, with no seeded data and no
 dependence on execution order. See [TESTING.md](TESTING.md) for the plan, the
 manual test session, and the open defects.
@@ -101,10 +102,18 @@ Every response uses `application/json`. Errors use a single envelope:
 | `GET` | `/api/me` | Bearer | The authenticated account |
 | `POST` | `/api/logout` | Bearer | Revoke the current token |
 
-**Amounts** are integers in minor units and must be at least 1.
+**Amounts** are integers in minor units, at least 1 and at most
+`WALLET_MAX_AMOUNT_MINOR` (10^12 by default); anything outside that is a 422.
 **Currencies** are one of `USD`, `IQD`, `EUR`, `GBP` (`config/wallet.php`).
 **Pagination**: `?per_page=` with a default of 20 and a maximum of 100,
 `?page=` for the offset.
+**Creating an account** requires `first_name` and `last_name` (2-100 letters,
+spaces, apostrophes or hyphens - Unicode-aware, so non-Latin names are valid),
+a unique `email`, a unique `phone` in E.164 form (`+` then 8-15 digits), a
+`password` of at least 12 characters with mixed case, a digit and a symbol, and
+a `currency`.
+**`Idempotency-Key`** must be 8 to 255 characters from `A-Za-z0-9._:-`,
+starting with a letter or digit. A UUID satisfies this.
 
 ### Status codes
 
@@ -112,13 +121,15 @@ Every response uses `application/json`. Errors use a single envelope:
 |---|---|
 | 201 | An account or a transaction was created — including a replayed idempotent request, which returns the original result |
 | 200 | A read, or a successful login |
-| 400 | `Idempotency-Key` header missing on a money endpoint |
+| 400 | `Idempotency-Key` missing (`idempotency_key_required`) or malformed (`idempotency_key_invalid`) |
 | 401 | No token, an invalid token, or bad credentials |
 | 403 | The account is not yours (`forbidden`), or the account is frozen (`account_frozen`) |
-| 404 | No such account |
-| 409 | An `Idempotency-Key` was reused with a different payload |
+| 404 | No such account, or no such route (`not_found`) |
+| 405 | Wrong HTTP verb for the route (`method_not_allowed`) |
+| 409 | A key was reused with a different payload (`idempotency_conflict`), or an identical request is still in flight (`idempotency_in_progress`) |
+| 422 | Validation failed (`validation_failed`), insufficient funds, a currency mismatch, or an amount outside the allowed range |
 | 429 | A rate limit was exceeded (`rate_limited`) |
-| 422 | Validation failed, insufficient funds, or a currency mismatch |
+| 500 | An unexpected failure (`server_error`) — the message never carries internals |
 
 ---
 
@@ -173,7 +184,8 @@ app/
   Http/Middleware/HandleIdempotency.php
   Http/Controllers/            thin: validate, delegate, present
   Exceptions/                  InsufficientFunds, CurrencyMismatch, AccountFrozen, NotAccountOwner
-config/wallet.php              allowed currencies, pagination bounds
+  Http/Middleware/ApiSecurityHeaders.php
+config/wallet.php              currencies, pagination bounds, amount ceiling, rate limits
 tests/
   Unit/MoneyTest.php           no framework, no database
   Feature/                     HTTP + real MySQL, plus the concurrency suite
@@ -251,8 +263,12 @@ that closed it.
 | BUG-12 | Low | The history endpoint returns Laravel's raw paginator while every other endpoint returns a hand-shaped body, and each row carries an always-null `idempotency_key` column. Cosmetic; changing the shape this late would have meant rewriting four tests for no behavioural gain |
 | BUG-14 | Medium | `POST /accounts` does not accept the specification's payload — a consequence of the authentication extension, not an oversight. See [Deviations](#deviations-from-the-specification) |
 
-Every fixed defect is now covered by a test that asserts the corrected
-behaviour, so none of them can silently regress.
+Most of the fixed defects are covered by a test that asserts the corrected
+behaviour, so they cannot silently regress. Three are not, and TESTING.md says
+so in each report: BUG-08 (the race needs an HTTP harness this container cannot
+provide), BUG-11 (a test would have to provoke a tie and then depend on the
+non-determinism being fixed) and BUG-13 (the frozen state is unreachable over
+the API).
 
 ---
 
@@ -346,7 +362,9 @@ them.
 | `DB_DATABASE` | `wallet` | Application schema |
 | `DB_USERNAME` / `DB_PASSWORD` | local dev values | MySQL credentials |
 | `APP_KEY` | generated on first boot, then reused | Laravel encryption key |
-| `APP_DEBUG` | `true` | Set to `false` outside local development — with it on, 500 responses include stack traces |
+| `APP_DEBUG` | `false` | `.env.example` ships it off, so 500 responses never leak internals. Turn it on locally to see stack traces |
+| `SANCTUM_EXPIRATION` | `60` | Token lifetime in minutes |
+| `CORS_ALLOWED_ORIGINS` | empty | Comma-separated origins; empty means no cross-origin browser access |
 | `WALLET_MAX_AMOUNT_MINOR` | `1000000000000` | Domain ceiling on any single amount, in minor units |
 | `RATE_LIMIT_LOGIN_PER_MINUTE` | `5` | Failed logins per credential + IP |
 | `RATE_LIMIT_LOGIN_IP_PER_MINUTE` | `30` | Failed logins per IP |
@@ -357,4 +375,5 @@ them.
 
 The allowed currencies and the pagination bounds live in `config/wallet.php`
 rather than the environment, because they are product decisions rather than
-deployment settings.
+deployment settings. The rate limits and the amount ceiling live there too, but
+read from the environment so a deployment can tune them without a code change.

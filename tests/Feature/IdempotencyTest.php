@@ -15,10 +15,10 @@ use Tests\TestCase;
  * conflict.
  *
  * The first five tests prove the rule holds for the case it was designed for.
- * The next two cover BUG-04 and BUG-05, which these tests found and which are
- * now fixed: a key is fingerprinted by method, path and body rather than by
- * body alone. The last one still pins BUG-06, which is reported in TESTING.md
- * and not fixed.
+ * The last three cover BUG-04, BUG-05 and BUG-06 — all three were found by
+ * these tests, and all three are now fixed. A key is fingerprinted by caller,
+ * method, path and body rather than by body alone, and every terminal outcome
+ * below 500 is recorded rather than only the 2xx ones.
  */
 class IdempotencyTest extends TestCase
 {
@@ -120,6 +120,29 @@ class IdempotencyTest extends TestCase
 
         $this->assertSame(10000, $account->fresh()->balance);
         $this->assertDatabaseCount('transactions', 1);
+    }
+
+    /**
+     * The header reaches the database and the logs, so its shape is bounded:
+     * 8 to 255 characters from a safe ASCII set, starting alphanumeric. A UUID
+     * satisfies it. A malformed key is refused before the operation runs, so a
+     * bad header can never move money unrecorded.
+     */
+    public function test_a_malformed_idempotency_key_is_refused_before_anything_happens(): void
+    {
+        $account = Account::factory()->create();
+        Sanctum::actingAs($account);
+
+        foreach (['short', 'has spaces in it', '-starts-with-a-dash', str_repeat('a', 256)] as $badKey) {
+            $this->withHeader('Idempotency-Key', $badKey)
+                ->postJson("/api/accounts/{$account->id}/deposits", ['amount' => 10000])
+                ->assertStatus(400)
+                ->assertJsonPath('error.code', 'idempotency_key_invalid');
+        }
+
+        $this->assertSame(0, $account->fresh()->balance);
+        $this->assertDatabaseCount('transactions', 0);
+        $this->assertDatabaseCount('idempotency_keys', 0);
     }
 
     public function test_a_successful_money_operation_records_its_idempotency_key(): void
