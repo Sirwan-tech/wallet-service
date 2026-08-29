@@ -195,42 +195,48 @@ class IdempotencyTest extends TestCase
     }
 
     /**
-     * KNOWN BUG (TESTING.md, BUG-06).
-     *
-     * HandleIdempotency stores a row only for 2xx responses, so a key whose
-     * first use failed is silently free again. Rule 4 says a key reused with a
-     * different payload must be a conflict; here it is accepted and applied.
-     *
-     * The realistic damage: a client times out on a request that actually
-     * returned 422, retries with an adjusted amount under the same key, and
-     * moves money it believed had been rejected.
+     * FIXED (TESTING.md, BUG-06). The middleware used to record a row only for
+     * 2xx responses, so a key whose first use failed was silently free again
+     * and could come back with a different payload. Every terminal outcome
+     * below 500 is now recorded, so a failure replays as the original failure
+     * and a changed payload is the conflict rule 4 requires. Server errors are
+     * still deliberately not cached, so a 5xx stays retryable.
      */
-    public function test_a_key_whose_first_use_failed_is_currently_reusable_with_a_different_payload(): void
+    public function test_a_key_whose_first_use_failed_is_recorded_and_cannot_be_reused(): void
     {
         $account = Account::factory()->create(); // balance 0
         Sanctum::actingAs($account);
         $key = $this->key();
 
-        // First use fails: nothing to withdraw.
+        // First use fails: there is nothing to withdraw.
         $this->withHeader('Idempotency-Key', $key)
             ->postJson("/api/accounts/{$account->id}/withdrawals", ['amount' => 10000])
             ->assertStatus(422)
             ->assertJsonPath('error.code', 'insufficient_funds');
 
-        // The key was never recorded, so it is free again.
-        $this->assertDatabaseMissing('idempotency_keys', ['idempotency_key' => $key]);
+        // The failure is a terminal outcome, so it is recorded ...
+        $this->assertDatabaseHas('idempotency_keys', [
+            'idempotency_key' => $key,
+            'response_status' => 422,
+        ]);
 
-        // Money arrives.
+        // ... and replaying the identical request returns that original result.
+        $this->withHeader('Idempotency-Key', $key)
+            ->postJson("/api/accounts/{$account->id}/withdrawals", ['amount' => 10000])
+            ->assertStatus(422)
+            ->assertJsonPath('error.code', 'insufficient_funds');
+
+        // Money arrives under a different key.
         $this->withHeader('Idempotency-Key', $this->key())
             ->postJson("/api/accounts/{$account->id}/deposits", ['amount' => 10000])
             ->assertStatus(201);
 
-        // Same key, different payload: rule 4 requires 409. It succeeds instead.
+        // The used key with a changed payload is now a conflict, not a success.
         $this->withHeader('Idempotency-Key', $key)
             ->postJson("/api/accounts/{$account->id}/withdrawals", ['amount' => 5000])
-            ->assertStatus(201)
-            ->assertJsonPath('type', 'withdrawal');
+            ->assertStatus(409)
+            ->assertJsonPath('error.code', 'idempotency_conflict');
 
-        $this->assertSame(5000, $account->fresh()->balance);
+        $this->assertSame(10000, $account->fresh()->balance);
     }
 }

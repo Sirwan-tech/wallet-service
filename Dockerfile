@@ -16,4 +16,12 @@ RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cac
 
 EXPOSE 8000
 
-CMD php artisan migrate --force && php artisan serve --host=0.0.0.0 --port=8000
+# Start-up is written so that a clean checkout needs no manual steps: create a
+# .env if there is none, generate an APP_KEY only if one is missing (so restarts
+# never rotate it), run the migrations, and serve regardless of whether the
+# migration succeeded on the first attempt against a cold database.
+CMD sh -c "\
+    [ -f .env ] || cp .env.example .env; \
+    grep -q '^APP_KEY=base64:' .env || php artisan key:generate --force --no-interaction; \
+    php artisan migrate --force || echo 'migrate failed - serving anyway'; \
+    php artisan serve --host=0.0.0.0 --port=8000"

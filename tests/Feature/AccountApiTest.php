@@ -21,7 +21,8 @@ class AccountApiTest extends TestCase
             'last_name'  => 'Ahmed',
             'email'      => 'sirwan@example.com',
             'phone'      => '+9647701234567',
-            'password'   => 'secret123',
+            // Must satisfy Password::min(12)->mixedCase()->numbers()->symbols().
+            'password'   => 'Str0ng-Passw0rd!',
             'currency'   => 'USD',
         ], $overrides);
     }
@@ -104,20 +105,42 @@ class AccountApiTest extends TestCase
     }
 
     /**
-     * KNOWN GAP (TESTING.md, BUG-02): the ModelNotFoundException renderer in
-     * bootstrap/app.php never fires, because Laravel converts that exception
-     * into a NotFoundHttpException before render callbacks are consulted. The
-     * status code is honest; the body escapes the error envelope. Pinned here
-     * so that fixing it is a deliberate, visible change.
+     * FIXED (TESTING.md, BUG-02). The original renderer was typed on
+     * ModelNotFoundException and could never fire, because Laravel converts
+     * that exception into a NotFoundHttpException before the render callbacks
+     * are consulted, so every 404 escaped the error envelope and leaked the
+     * model class. The renderer is now typed on NotFoundHttpException, which
+     * also covers unknown routes.
      */
-    public function test_an_unknown_account_returns_404_but_not_the_error_envelope(): void
+    public function test_an_unknown_account_returns_404_in_the_error_envelope(): void
     {
         Sanctum::actingAs(Account::factory()->create());
 
-        $response = $this->getJson('/api/accounts/' . Str::uuid());
+        $this->getJson('/api/accounts/' . Str::uuid())
+            ->assertStatus(404)
+            ->assertJsonPath('error.code', 'not_found')
+            ->assertJsonMissingPath('exception');
+    }
 
-        $response->assertStatus(404);
-        $this->assertNull($response->json('error.code'));
+    /**
+     * FIXED (TESTING.md, BUG-09). An unknown route used to answer with an HTML
+     * error page, because Laravel chooses JSON from the Accept header and a
+     * plain curl does not ask for it. The application now forces JSON for
+     * anything under the /api prefix.
+     */
+    public function test_an_unknown_route_answers_json_not_html(): void
+    {
+        $this->get('/api/no-such-endpoint')
+            ->assertStatus(404)
+            ->assertJsonPath('error.code', 'not_found');
+    }
+
+    /** FIXED (TESTING.md, BUG-09): the wrong verb is an enveloped 405. */
+    public function test_a_wrong_http_method_answers_405_in_the_error_envelope(): void
+    {
+        $this->get('/api/transfers')
+            ->assertStatus(405)
+            ->assertJsonPath('error.code', 'method_not_allowed');
     }
 
     // --------------------------------------------------------------- deposit

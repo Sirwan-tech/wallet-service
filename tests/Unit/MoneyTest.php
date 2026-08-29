@@ -139,18 +139,36 @@ class MoneyTest extends TestCase
     }
 
     /**
-     * KNOWN GAP (reported in TESTING.md): add() and subtract() build a Money
-     * through the private constructor and therefore skip the non-negative
-     * guard in of(). No negative balance can reach the database today because
-     * WalletService checks the balance before subtracting, but the value
-     * object does not defend the invariant on its own. This test pins the
-     * current behaviour so that fixing it is a deliberate, visible change.
+     * FIXED (TESTING.md, BUG-01). add() and subtract() used to build a Money
+     * through the private constructor, skipping the non-negative guard in
+     * of(). Both now route through of(), so the value object defends its own
+     * invariant rather than relying on every caller to check first.
      */
-    public function test_subtract_currently_produces_a_negative_money_bypassing_the_of_guard(): void
+    public function test_subtract_refuses_to_produce_a_negative_money(): void
     {
-        $result = Money::of(100, 'USD')->subtract(Money::of(150, 'USD'));
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Amount cannot be negative.');
 
-        $this->assertSame(-50, $result->minorUnits);
-        $this->assertTrue($result->isNegative());
+        Money::of(100, 'USD')->subtract(Money::of(150, 'USD'));
+    }
+
+    /** The boundary the rule turns on: spending the whole amount is legal. */
+    public function test_subtracting_the_whole_amount_is_allowed_and_yields_zero(): void
+    {
+        $this->assertSame(0, Money::of(100, 'USD')->subtract(Money::of(100, 'USD'))->minorUnits);
+    }
+
+    /**
+     * FIXED (TESTING.md, BUG-10). An addition past PHP_INT_MAX used to promote
+     * silently to a float and then fail the readonly int constructor with a
+     * TypeError, surfacing to the client as a 500. It is now a guarded
+     * InvalidArgumentException, which the API already renders as a 422.
+     */
+    public function test_addition_beyond_the_integer_range_is_refused(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Amount exceeds the supported range.');
+
+        Money::of(PHP_INT_MAX, 'USD')->add(Money::of(1, 'USD'));
     }
 }
