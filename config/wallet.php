@@ -21,8 +21,8 @@ return [
     'rate_limits' => [
         'login_per_minute' => (int) env('RATE_LIMIT_LOGIN_PER_MINUTE', 5),
         'login_ip_per_minute' => (int) env('RATE_LIMIT_LOGIN_IP_PER_MINUTE', 30),
-        'registration_per_minute' => (int) env('RATE_LIMIT_REGISTRATION_PER_MINUTE', 3),
-        'registration_per_hour' => (int) env('RATE_LIMIT_REGISTRATION_PER_HOUR', 20),
+        'registration_per_minute' => (int) env('RATE_LIMIT_REGISTRATION_PER_MINUTE', 10),
+        'registration_per_hour' => (int) env('RATE_LIMIT_REGISTRATION_PER_HOUR', 60),
         'money_per_minute' => (int) env('RATE_LIMIT_MONEY_PER_MINUTE', 10),
         'money_ip_per_minute' => (int) env('RATE_LIMIT_MONEY_IP_PER_MINUTE', 60),
         'authenticated_post_per_minute' => (int) env('RATE_LIMIT_AUTH_POST_PER_MINUTE', 30),

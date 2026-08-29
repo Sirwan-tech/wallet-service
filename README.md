@@ -44,6 +44,11 @@ curl -X POST http://localhost:8000/api/accounts/{id}/deposits \
   -d '{"amount":10000}'
 ```
 
+> **If you are exploring by hand and see `429 rate_limited`:** the endpoints are
+> rate limited per IP — 10 account creations and 10 money operations a minute.
+> Wait a minute, or raise the matching `RATE_LIMIT_*` value in `.env`. Passwords
+> must be at least 12 characters with mixed case, a digit and a symbol.
+
 ### Running the tests
 
 ```bash
