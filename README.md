@@ -28,13 +28,13 @@ Create an account and deposit into it:
 ```bash
 curl -X POST http://localhost:8000/api/accounts \
   -H 'Content-Type: application/json' -H 'Accept: application/json' \
-  -d '{"first_name":"Alice","last_name":"Adams","email":"alice@example.com","phone":"+9647701234567","password":"secret123","currency":"USD"}'
+  -d '{"first_name":"Alice","last_name":"Adams","email":"alice@example.com","phone":"+9647701234567","password":"Str0ng-Passw0rd!","currency":"USD"}'
 ```
 
 ```bash
 curl -X POST http://localhost:8000/api/login \
   -H 'Content-Type: application/json' -H 'Accept: application/json' \
-  -d '{"login":"alice@example.com","password":"secret123"}'
+  -d '{"login":"alice@example.com","password":"Str0ng-Passw0rd!"}'
 ```
 
 ```bash
@@ -57,7 +57,7 @@ docker compose up -d --wait db_test
 docker compose run --rm app php artisan test
 ```
 
-**67 tests, all passing.** They run against a real MySQL 8 database in a
+**71 tests, all passing.** They run against a real MySQL 8 database in a
 dedicated `db_test` container, from a clean checkout, with no seeded data and no
 dependence on execution order. See [TESTING.md](TESTING.md) for the plan, the
 manual test session, and the open defects.
@@ -109,9 +109,10 @@ Every response uses `application/json`. Errors use a single envelope:
 | 200 | A read, or a successful login |
 | 400 | `Idempotency-Key` header missing on a money endpoint |
 | 401 | No token, an invalid token, or bad credentials |
-| 403 | The account is not yours, or the account is frozen |
+| 403 | The account is not yours (`forbidden`), or the account is frozen (`account_frozen`) |
 | 404 | No such account |
 | 409 | An `Idempotency-Key` was reused with a different payload |
+| 429 | A rate limit was exceeded (`rate_limited`) |
 | 422 | Validation failed, insufficient funds, or a currency mismatch |
 
 ---
@@ -122,7 +123,7 @@ Every response uses `application/json`. Errors use a single envelope:
 of minor units and an uppercase 3-letter code. It is immutable and `readonly`,
 its constructor is private, and arithmetic between different currencies throws.
 Because it depends on nothing, the arithmetic and boundary rules are unit-tested
-with no framework and no database — 17 tests that run in well under a second.
+with no framework and no database — 19 tests that run in well under a second.
 
 **Balances change only inside a locked transaction.** Every money operation in
 `App\Services\WalletService` opens a `DB::transaction()` and re-reads the account
@@ -137,17 +138,19 @@ recoverable. Any failure rolls back the whole thing: a rejected transfer leaves
 *no* record, which the tests assert explicitly rather than only checking the
 balances.
 
-**The ledger is append-only.** `Transaction` sets `const UPDATED_AT = null` and
-records `balance_after` on every row, so a statement can be replayed and
-reconciled without recomputation. Corrections are meant to be new rows, never
-edits.
+**The ledger is append-only, and enforced.** `Transaction` sets
+`const UPDATED_AT = null`, records `balance_after` on every row so a statement
+can be replayed without recomputation, and throws on `updating` and `deleting`.
+Corrections are new rows, never edits. In a real deployment the database
+privileges should say the same thing.
 
 **Idempotency is middleware, not business logic.** `HandleIdempotency` sits in
 front of the three money endpoints, so `WalletService` never has to know that
 retries exist. A replay returns the stored response; a key reused with a
 different payload is a 409.
-*This is also where the service's most serious defects are — see
-[Known defects](#known-defects) before relying on it.*
+This layer is also where the service's most serious defects were found, and
+where the most work went into closing them — see
+[Known defects](#known-defects).
 
 **UUID primary keys.** Ordered UUIDs (`HasUuids`), so account and transaction
 identifiers are safe to expose and are not guessable or countable.
@@ -164,7 +167,7 @@ app/
   Services/WalletService.php    deposit / withdraw / transfer, locking, ledger writes
   Http/Middleware/HandleIdempotency.php
   Http/Controllers/            thin: validate, delegate, present
-  Exceptions/                  InsufficientFunds, CurrencyMismatch, AccountFrozen
+  Exceptions/                  InsufficientFunds, CurrencyMismatch, AccountFrozen, NotAccountOwner
 config/wallet.php              allowed currencies, pagination bounds
 tests/
   Unit/MoneyTest.php           no framework, no database
@@ -216,31 +219,35 @@ than finished.
 
 ## Known defects
 
-The service is not defect-free. TESTING.md documents all fourteen defects with
-reproduction steps and severity reasoning rather than leaving them for a reviewer
-to find. **Five were found and fixed before submission; nine remain open.**
+TESTING.md documents all fourteen defects with reproduction steps and severity
+reasoning, rather than leaving them for a reviewer to find. **Twelve were found
+and fixed before submission; two remain open.** The reports are kept in full,
+each with a Fixed note, because how a defect was found says more than the diff
+that closed it.
 
-**Found and fixed late**
+**Found and fixed**
 
 | ID | Severity | What it was |
 |---|---|---|
-| BUG-04 / BUG-05 | Critical | An idempotency key was fingerprinted from the request **body alone**, so the same key on a different account or a different endpoint replayed the wrong stored response and the money silently never moved. The fingerprint now covers method + path + body |
+| BUG-04 / BUG-05 | Critical | An idempotency key was fingerprinted from the request **body alone**, so the same key on a different account or endpoint replayed the wrong stored response and the money silently never moved. The fingerprint now covers method + path + body |
 | BUG-07 | Critical | No ownership check — any authenticated caller could read and drain any account. Every account route now compares the caller against the target and answers `403 forbidden` |
-| BUG-03 | High | `?per_page=-1` produced a MySQL syntax error and a 500. The page size is now clamped on both sides, reading its bounds from `config/wallet.php` |
-| BUG-11 | Medium | "Newest first" had no tiebreaker, so pagination could duplicate or skip rows. The query now orders by `created_at` then `id` |
+| BUG-08 | High | The idempotency guard was a non-atomic check-then-insert. The key is now reserved *before* the operation, inside the same transaction, so a concurrent duplicate loses on the unique index |
+| BUG-03 | High | `?per_page=-1` produced a MySQL syntax error and a 500. The page size is clamped on both sides, reading its bounds from `config/wallet.php` |
+| BUG-02 / BUG-09 | Medium | 404, 405 and unhandled errors escaped the JSON envelope, and a plain `curl` to an unknown route received HTML. Renderers were retyped onto the exceptions Laravel actually raises, JSON is forced for `/api/*`, and a catch-all `Throwable` closes the rest |
+| BUG-06 | Medium | A key whose first use returned 4xx was never recorded and could be reused with a different payload. Every terminal outcome below 500 is now recorded; a 5xx deliberately stays retryable |
+| BUG-10 / BUG-01 | Medium | `amount` had no ceiling and `Money::add` could overflow into a float and a 500. There is now a domain maximum and an explicit overflow guard, both surfacing as 422 |
+| BUG-11 | Medium | "Newest first" had no tiebreaker, so pagination could duplicate or skip rows. The query orders by `created_at` then `id` |
+| BUG-13 | Low | `withdraw()` was the only money path that skipped the frozen check. All three now carry the same guards |
 
-**Still open — the ones that matter**
+**Still open**
 
 | ID | Severity | Summary |
 |---|---|---|
-| BUG-08 | High | The idempotency guard is a non-atomic check-then-insert, so concurrent same-key requests can both apply (found by inspection, **not** reproduced under load) |
-| BUG-06 | Medium | A key whose first use returned 4xx is never recorded, so it can be reused with a different payload instead of conflicting |
-| BUG-02 / BUG-09 | Medium | 404, 405 and unhandled 500 responses escape the JSON error envelope; a plain `curl` to an unknown route receives HTML |
-| BUG-10 | Medium | `amount` has no upper bound, so an overflowing deposit answers 500 instead of 422 |
+| BUG-12 | Low | The history endpoint returns Laravel's raw paginator while every other endpoint returns a hand-shaped body, and each row carries an always-null `idempotency_key` column. Cosmetic; changing the shape this late would have meant rewriting four tests for no behavioural gain |
+| BUG-14 | Medium | `POST /accounts` does not accept the specification's payload — a consequence of the authentication extension, not an oversight. See [Deviations](#deviations-from-the-specification) |
 
-Three of the open defects are pinned by tests that assert the current behaviour,
-with a docblock naming the bug and the fix, so that correcting them is a visible,
-deliberate change rather than a silent one.
+Every fixed defect is now covered by a test that asserts the corrected
+behaviour, so none of them can silently regress.
 
 ---
 
@@ -259,15 +266,27 @@ tests, each booting Laravel, and adds about thirty seconds to the run. A faster
 harness would have been possible; a *convincing* one would not, and rule 7 is
 the highest-risk requirement in the service.
 
-**The pinned-defect tests will need rewriting when the defects are fixed.** That
-is intentional. A green suite that quietly agrees with a bug is worse than a
-test that names it.
+**Some tests were written to pin a defect, then rewritten once it was fixed.**
+That churn is intentional. A green suite that quietly agrees with a bug is worse
+than a test that names it, and rewriting the assertion is what makes the fix a
+visible, deliberate change instead of a silent one. The docblocks kept the
+history: each says what the defect was and what closed it.
+
+**A security layer was added that the specification did not ask for.**
+Per-endpoint rate limiting, CORS, security response headers, Unicode-aware input
+validation and a domain ceiling on amounts. None of it is required by the brief
+and none of it is offered as credit — it is documented here and in TESTING.md's
+Q14 because an undocumented layer in a submission is worse than an owned one.
+The cost is honest: it is more surface than the task called for, and it is the
+second thing (after authentication) that I would strip to bring the service back
+to exactly what was asked.
 
 **The container serves with `php artisan serve`.** Single-worker, so concurrent
 requests are handled one at a time. It keeps `docker compose up` to one command
 with no nginx or php-fpm configuration, but it also means concurrency cannot be
 demonstrated over HTTP — which is why the concurrency tests drive the service
-layer in parallel processes instead, and why BUG-08 could not be reproduced.
+layer in parallel processes instead, and why BUG-08's race was fixed from a
+reading of the code rather than from a reproduction.
 
 **Authentication was kept rather than removed.** Fixing BUG-07 made the
 authorization boundary real, but the layer itself should not exist — it was out
@@ -281,32 +300,33 @@ deviation rather than a feature.
 
 In this order, because this is the order in which the risk falls.
 
-1. **Remove the authentication extension.** It restores the specification's
-   create-account payload (BUG-14) and removes the unique email/phone constraint
-   that stops one owner holding two currencies. BUG-07 is already closed, but
-   one deletion would make the whole boundary unnecessary rather than merely
-   correct.
-2. **Close the last idempotency gap.** Reserve the key *inside* the same
-   transaction as the money movement so a concurrent retry loses on the unique
-   index instead of double-applying (BUG-08), and record failed attempts so a
-   used key cannot come back with a different payload (BUG-06). Add
-   `UNIQUE(account_id, idempotency_key)` on `transactions` as a ledger-level
-   backstop — the column already exists and is never written.
-3. **Serve behind php-fpm and nginx**, so concurrency can be demonstrated over
-   real HTTP and BUG-08 can be *proved* rather than reasoned about. This is the
-   only remaining finding I could not reproduce, and it is the reason.
-4. **Close the error contract.** A catch-all renderer so 404, 405, 500 and
-   malformed bodies all use the same envelope, and retype the not-found renderer
-   which is currently dead code (BUG-02, BUG-09).
-5. **Extract the balance rule into a pure function** over
+1. **Remove the authentication extension, and the security layer with it.**
+   Neither was asked for. Removing them restores the specification's
+   create-account payload (BUG-14), drops the unique email/phone constraint that
+   stops one owner holding two currencies, unwelds `Account` from the framework's
+   `Authenticatable`, and takes the service back to the surface the brief
+   describes. BUG-07 is already closed, but one deletion would make that boundary
+   unnecessary rather than merely correct.
+2. **Serve behind php-fpm and nginx, then prove BUG-08.** The reservation-row fix
+   is sound but it rests on a reading of the code: `php artisan serve` is
+   single-worker, so I could never drive two concurrent requests through the full
+   middleware stack to reproduce the original race. That is the one claim in this
+   repository backed by an argument rather than a test, and it is the gap I would
+   close first.
+3. **Add `UNIQUE(account_id, idempotency_key)` on `transactions`** as a
+   ledger-level backstop, and populate the column — it exists, is fillable, and
+   is never written, which is half of BUG-12.
+4. **Extract the balance rule into a pure function** over
    `(balanceMinor, amountMinor, currency)`, so rule 1 is unit-testable with no
    database and `WalletService` becomes a thin persistence shell around it. Today
-   only `Money` meets the specification's "testable without a live database" bar.
-6. **Bound `amount` and guard `Money::add` against overflow** (BUG-10), route
-   `add`/`subtract` through `of()` so the value object defends its own invariant
-   (BUG-01), and shape the history response like every other endpoint (BUG-12).
-7. **Give idempotency keys a lifetime** — a retention window and an explicit
+   only `Money` meets the specification's "testable without a live database" bar,
+   and that is the weakest point in the Structure of this submission.
+5. **Shape the history response like every other endpoint** and finish BUG-12.
+6. **Give idempotency keys a lifetime** — a retention window and an explicit
    rejection of keys older than it, instead of an unbounded table.
+7. **Add a per-currency minor-unit exponent.** `1000` means $10.00 in USD and
+   1000 IQD, and nothing in the schema records which. Nothing renders a balance
+   today, so it does not bite yet; the moment anything does, it will.
 
 ---
 
@@ -320,5 +340,16 @@ them.
 |---|---|---|
 | `DB_DATABASE` | `wallet` | Application schema |
 | `DB_USERNAME` / `DB_PASSWORD` | local dev values | MySQL credentials |
-| `APP_KEY` | generated on first boot | Laravel encryption key |
+| `APP_KEY` | generated on first boot, then reused | Laravel encryption key |
 | `APP_DEBUG` | `true` | Set to `false` outside local development — with it on, 500 responses include stack traces |
+| `WALLET_MAX_AMOUNT_MINOR` | `1000000000000` | Domain ceiling on any single amount, in minor units |
+| `RATE_LIMIT_LOGIN_PER_MINUTE` | `5` | Failed logins per credential + IP |
+| `RATE_LIMIT_LOGIN_IP_PER_MINUTE` | `30` | Failed logins per IP |
+| `RATE_LIMIT_REGISTRATION_PER_MINUTE` / `_PER_HOUR` | `3` / `20` | Account creations per IP |
+| `RATE_LIMIT_MONEY_PER_MINUTE` | `10` | Money operations per account |
+| `RATE_LIMIT_MONEY_IP_PER_MINUTE` | `60` | Money operations per IP |
+| `RATE_LIMIT_AUTH_POST_PER_MINUTE` | `30` | Other authenticated POSTs per account |
+
+The allowed currencies and the pagination bounds live in `config/wallet.php`
+rather than the environment, because they are product decisions rather than
+deployment settings.

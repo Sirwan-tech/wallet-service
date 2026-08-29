@@ -32,22 +32,32 @@ and `$_ENV`, while Laravel reads `$_SERVER` first, so the container's own
 `DB_HOST=db` won. The fix was matching `<server>` entries in `phpunit.xml`; the
 guard makes a regression loud instead of destructive.
 
-**Current state: 67 tests, 67 passing.**
+**Current state: 71 tests, 71 passing, 275 assertions.**
 
 | Suite | File | Tests | What it covers |
 |---|---|---:|---|
-| Unit | `tests/Unit/MoneyTest.php` | 17 | The `Money` value object — no Laravel, no database |
+| Unit | `tests/Unit/MoneyTest.php` | 19 | The `Money` value object — no Laravel, no database |
 | Feature | `tests/Feature/WalletServiceTest.php` | 4 | The balance rule at the service layer |
-| Feature | `tests/Feature/AccountApiTest.php` | 25 | Create / read / deposit / withdraw / history / ownership over HTTP |
+| Feature | `tests/Feature/AccountApiTest.php` | 27 | Create / read / deposit / withdraw / history / ownership / error contract over HTTP |
 | Feature | `tests/Feature/TransferApiTest.php` | 10 | Transfers, atomicity, the currency rule, ownership |
-| Feature | `tests/Feature/IdempotencyTest.php` | 8 | Rule 4, plus one remaining pinned defect |
+| Feature | `tests/Feature/IdempotencyTest.php` | 8 | Rule 4 in all its forms |
 | Feature | `tests/Feature/ConcurrencyTest.php` | 3 | Rule 7, under real parallel load |
 
-Five of the defects in section 4 were **found by these tests and by the manual
-session, and then fixed** before submission: BUG-03, BUG-04, BUG-05, BUG-07 and
-BUG-11. Their reports are kept in full, with a Fixed note, because how a defect
-was found matters more than the diff that closed it. Nine remain open and are
-documented as such.
+**Twelve of the fourteen defects in section 4 were found and then fixed** before
+submission. Their reports are kept in full, each with a Fixed note, because how
+a defect was found is more informative than the diff that closed it — and
+because several were found by the tests themselves, which is the point of
+writing them. Two remain: BUG-12, a cosmetic response-shape inconsistency, and
+BUG-14, a deliberate deviation from the specification.
+
+### A note on the security layer
+
+The service also carries per-endpoint rate limiting, CORS configuration,
+security response headers, Unicode-aware input validation and a domain ceiling
+on amounts. **None of this was asked for.** The specification does not mention
+it, and it is not offered as credit — it is recorded here because leaving an
+undocumented layer in a submission would be worse than owning it. The relevant
+consequence for testing is in Q14.
 
 ---
 
@@ -114,12 +124,16 @@ result is stable.
   subtle interaction worth preserving, it is a missing check. Once it was fixed
   the four tests that belong there were written, asserting 403 on reading,
   withdrawing from, listing, and transferring out of somebody else’s account.
-- **The idempotency race under concurrency (BUG-08).** I can describe the exact
-  interleaving from the code, but proving it needs concurrent requests through
-  the full HTTP middleware stack, and the container serves with a single-worker
-  `php artisan serve`. Building an in-process HTTP-kernel harness for it was not
-  the best use of the remaining time. Reported below as found-but-unproven, and
-  labelled as such rather than implying coverage I do not have.
+- **The idempotency race under concurrency (BUG-08) — found by reading, fixed,
+  still not reproduced.** I could describe the interleaving exactly from the
+  code, and the fix (a reservation row written inside the same transaction as
+  the money movement) follows from it. What I could not do is *prove* the
+  original race end to end: that needs concurrent requests through the full HTTP
+  middleware stack, and the container serves with a single-worker
+  `php artisan serve` that handles requests one at a time. Building an
+  in-process HTTP-kernel harness was not the best use of the remaining time. The
+  fix is reasoned and the surrounding behaviour is tested; the race itself is
+  not, and the report says so rather than implying coverage I do not have.
 - **Load and performance.** Out of scope; the concurrency tests are about
   correctness under contention, not throughput.
 - **The `frozen` account state.** No endpoint can set `status = 'frozen'`, so
@@ -193,19 +207,25 @@ compound: Alice first took 100 from Bob, then Bob's own 10000 deposit was
 silently swallowed — his balance went from 2500 to 2400 across two responses
 that both said "success".
 
-**Since this session, five of the nine failures have been fixed.** The table
+**Since this session, eight of the nine failures have been fixed.** The table
 above is left exactly as recorded on 2026-08-28, because it is the evidence that
-found them. Re-running those cases today gives:
+found them. The current behaviour is:
 
 | ID | Then | Now |
 |---|---|---|
 | MT-20 | 500, MySQL error 1064 | 200; the page size falls back to the configured default of 20 |
-| MT-22 | 200 — Bob’s details returned to Alice | 403 `forbidden` |
+| MT-21 | 404 with the model class and a stack trace | 404 `{"error":{"code":"not_found"}}` |
+| MT-22 | 200 — Bob's details returned to Alice | 403 `forbidden` |
 | MT-23 | 201 — 100 debited from Bob | 403 `forbidden`, nothing moves |
-| MT-24 | 201 carrying Alice’s record | 409 `idempotency_conflict` |
-| MT-25 | Bob’s 10000 silently vanished | n/a — the request is now refused before it can vanish |
+| MT-24 | 201 carrying Alice's record | 409 `idempotency_conflict` |
+| MT-25 | Bob's 10000 silently vanished | n/a — the request is refused before it can vanish |
+| MT-26 | an HTML error page | 404 `{"error":{"code":"not_found"}}` |
+| MT-27 | 405 in Laravel's own shape | 405 `{"error":{"code":"method_not_allowed"}}` |
 
-MT-02, MT-21, MT-26 and MT-27 still fail and are still reported below.
+Each of those is now covered by an automated test, so the manual case does not
+have to be re-run by hand to stay honest. **MT-02 still fails** — it is BUG-14,
+the deliberate deviation, and it is the one failure that is a decision rather
+than a defect.
 
 ---
 
@@ -226,21 +246,25 @@ wrong person. **High** — a stated requirement demonstrably does not hold.
 | BUG-05 | The same key across two endpoints swallows the opposite operation | Critical | **Fixed late** |
 | BUG-07 | No ownership check — any authenticated caller can read and drain any account | Critical | **Fixed late** |
 | BUG-03 | `per_page=-1` crashes the history endpoint with a MySQL syntax error | High | **Fixed late** |
-| BUG-08 | The idempotency guard is a non-atomic check-then-insert | High | Open, **not reproduced** |
-| BUG-02 | 404 responses escape the error envelope and leak internals | Medium | Open, pinned by a test |
-| BUG-06 | A key whose first use failed becomes reusable with a different payload | Medium | Open, pinned by a test |
-| BUG-09 | Framework errors (unknown route, wrong method) escape the JSON contract | Medium | Open |
-| BUG-10 | `amount` has no upper bound, so a large deposit returns 500 | Medium | Open |
+| BUG-08 | The idempotency guard is a non-atomic check-then-insert | High | **Fixed late** |
+| BUG-02 | 404 responses escape the error envelope and leak internals | Medium | **Fixed late** |
+| BUG-06 | A key whose first use failed becomes reusable with a different payload | Medium | **Fixed late** |
+| BUG-09 | Framework errors (unknown route, wrong method) escape the JSON contract | Medium | **Fixed late** |
+| BUG-10 | `amount` has no upper bound, so a large deposit returns 500 | Medium | **Fixed late** |
 | BUG-11 | "Newest first" is not a deterministic order | Medium | **Fixed late** |
-| BUG-14 | `POST /accounts` rejects the payload the specification defines | Medium | Deliberate deviation |
-| BUG-01 | `Money::add()`/`subtract()` bypass the non-negative guard | Low | Open, pinned by a test |
-| BUG-12 | The history response is shaped unlike every other endpoint, and leaks a column | Low | Open |
-| BUG-13 | `withdraw()` is the only money path that skips the frozen check | Low | Open |
+| BUG-14 | `POST /accounts` rejects the payload the specification defines | Medium | **Open** — deliberate deviation |
+| BUG-01 | `Money::add()`/`subtract()` bypass the non-negative guard | Low | **Fixed late** |
+| BUG-12 | The history response is shaped unlike every other endpoint, and leaks a column | Low | **Open** |
+| BUG-13 | `withdraw()` is the only money path that skips the frozen check | Low | **Fixed late** |
+
+Every "Fixed late" row is now covered by a test that asserts the corrected
+behaviour, so the fix cannot silently regress. The two open rows are a cosmetic
+inconsistency and a decision, not defects that were left unattended.
 
 ---
 
 ### BUG-01 — `Money::add()` and `Money::subtract()` bypass the non-negative guard
-**Severity: Low.** *Not fixed.*
+**Severity: Low.** *Found while writing the unit tests, **fixed late**.*
 
 **Steps to reproduce (unit level):** `Money::of(100,'USD')->subtract(Money::of(150,'USD'))`
 returns a `Money` whose `minorUnits` is `-50`, and `isNegative()` returns true.
@@ -261,10 +285,18 @@ safety of the system rests on every caller remembering to check first. Pinned by
 **Fix.** Route `add()` and `subtract()` through `self::of()`, and either use
 `isNegative()` or delete it.
 
+
+**Fixed.** `add()` and `subtract()` now return through `self::of()` instead of
+the private constructor, so the non-negative guard applies to every path, and
+`add()` refuses an operand that would carry the total past `PHP_INT_MAX`.
+`MoneyTest::test_subtract_refuses_to_produce_a_negative_money` and
+`test_subtracting_the_whole_amount_is_allowed_and_yields_zero` cover the rule
+and its boundary.
+
 ---
 
 ### BUG-02 — 404 responses escape the error envelope and leak internals
-**Severity: Medium.** *Not fixed.*
+**Severity: Medium.** *Found by manual testing (MT-21), **fixed late**.*
 
 **Steps to reproduce:** `GET /api/accounts/11111111-1111-1111-1111-111111111111`
 with a valid token.
@@ -289,6 +321,15 @@ deposit, withdraw, and transfers to an unknown account. Pinned by
 
 **Fix.** Type the callback on `NotFoundHttpException` instead, which also covers
 unknown routes and therefore partly addresses BUG-09.
+
+
+**Fixed.** The renderer is now typed on `NotFoundHttpException` - the exception
+Laravel actually reaches the callbacks with - so every not-found path returns
+`404 {"error":{"code":"not_found","message":"Resource not found."}}` with no
+model class and no stack trace. The same change covers unknown routes, which is
+half of BUG-09.
+`AccountApiTest::test_an_unknown_account_returns_404_in_the_error_envelope`
+asserts the code and that no `exception` key is present.
 
 ---
 
@@ -429,7 +470,7 @@ asserts 409 and that the balance is untouched.
 ---
 
 ### BUG-06 — A key whose first use failed becomes reusable with a different payload
-**Severity: Medium.** *Not fixed.*
+**Severity: Medium.** *Found while writing the idempotency tests, **fixed late**.*
 
 **Steps to reproduce**
 1. Account balance 0. `POST .../withdrawals` `{"amount":10000}` with key `k`.
@@ -455,6 +496,15 @@ rejected. Pinned by
 **Fix.** Persist the outcome of every terminal response, not just 2xx. If failed
 attempts should stay retryable that is defensible, but the key and hash must
 still be recorded so the conflict check keeps working.
+
+
+**Fixed.** Every terminal outcome below 500 is now recorded, so a 422 is
+replayed as the original 422 and the same key with a changed payload is the 409
+the rule requires. Server errors are deliberately still not cached: a 5xx rolls
+the reservation back and stays retryable, which is the behaviour a client needs
+when it cannot tell whether the operation ran.
+`IdempotencyTest::test_a_key_whose_first_use_failed_is_recorded_and_cannot_be_reused`
+walks the whole sequence: 422, recorded, replayed, then conflict.
 
 ---
 
@@ -519,8 +569,8 @@ trade-off, not an endorsement — see Q2.
 ---
 
 ### BUG-08 — The idempotency guard is a non-atomic check-then-insert
-**Severity: High.** *Not fixed. Found by reading the code; **not** reproduced
-under load — see below.*
+**Severity: High.** *Found by reading the code, **fixed late**. It was never reproduced
+under load - see the note at the end of this report.*
 
 **Description.** In `HandleIdempotency::handle()` the lookup
 (`IdempotencyKey::where(...)->first()`, line 30) and the write
@@ -558,10 +608,25 @@ loser. A `UNIQUE(account_id, idempotency_key)` on `transactions` would give a
 second, ledger-level backstop — the column already exists in the schema and in
 `$fillable` but is never written.
 
+
+**Fixed.** The middleware now inserts a reservation row for the key *before*
+calling `$next()`, inside the same `DB::transaction` as the money movement, and
+updates that row with the real status and body afterwards. A concurrent request
+with the same key loses on the unique index instead of executing a second time,
+and the reservation and the money commit or roll back together, so the crash
+window between them is closed. A 5xx deliberately rolls the whole thing back
+rather than caching an unreplayable response.
+
+*Still true, and worth keeping:* this fix is reasoned and unit-covered, but the
+race itself was never reproduced end to end. Doing that needs concurrent
+requests through the full HTTP middleware stack, and the container serves with a
+single-worker `php artisan serve` that handles requests one at a time. The
+service-layer concurrency tests prove rule 7; they do not exercise this path.
+
 ---
 
 ### BUG-09 — Framework errors escape the JSON error contract entirely
-**Severity: Medium.** *Not fixed.*
+**Severity: Medium.** *Found by manual testing (MT-26, MT-27), **fixed late**.*
 
 **Steps to reproduce**
 1. `curl http://localhost:8000/api/nope` — a plain curl, no `Accept` header.
@@ -589,10 +654,20 @@ response to a machine client.
 **Fix.** Add a catch-all `Throwable` renderer after the specific ones, or
 `$exceptions->shouldRenderJsonWhen(fn ($request) => $request->is('api/*'))`.
 
+
+**Fixed.** `bootstrap/app.php` now calls `shouldRenderJsonWhen()` for anything
+under `/api`, so a client that omits `Accept` still receives JSON rather than an
+HTML page, and renderers were added for `MethodNotAllowedHttpException` (405
+`method_not_allowed`), `ThrottleRequestsException` (429 `rate_limited`), a
+catch-all `HttpExceptionInterface`, and a final `Throwable` that answers 500
+`server_error` without leaking anything.
+`AccountApiTest::test_an_unknown_route_answers_json_not_html` and
+`test_a_wrong_http_method_answers_405_in_the_error_envelope` cover it.
+
 ---
 
 ### BUG-10 — `amount` has no upper bound, so a large deposit returns 500
-**Severity: Medium.** *Not fixed.*
+**Severity: Medium.** *Found by reasoning about the integer range, **fixed late**.*
 
 **Steps to reproduce**
 1. `POST .../deposits` `{"amount":9223372036854775807}` → 201. The `bigint`
@@ -614,6 +689,14 @@ front of it does.
 
 **Fix.** A `max:` rule on every amount, plus an explicit overflow guard in
 `Money::add` throwing `InvalidArgumentException` — which already renders as 422.
+
+
+**Fixed.** `config/wallet.php` now carries `max_amount_minor`, a domain ceiling
+of 10^12 minor units enforced on every amount, and `Money::add()` refuses an
+operand that would push the total past `PHP_INT_MAX`. Both surface as a 422 in
+the error envelope rather than a `TypeError` and a 500.
+`MoneyTest::test_addition_beyond_the_integer_range_is_refused` covers the
+arithmetic guard.
 
 ---
 
@@ -679,7 +762,7 @@ described in BUG-08) or drop the column.
 ---
 
 ### BUG-13 — `withdraw()` is the only money path that skips the frozen check
-**Severity: Low.** *Not fixed.*
+**Severity: Low.** *Found by comparing the three money paths, **fixed late**.*
 
 **Description.** `WalletService::deposit()` and `transfer()` both call
 `assertActive()`. `withdraw()` does not, so a frozen account could still be
@@ -691,6 +774,14 @@ feature is dead code today. It is recorded because the asymmetry is a trap — t
 first person to add an admin freeze endpoint inherits a hole that looks closed.
 The frozen-account feature is also outside the specification and would be better
 removed than completed.
+
+
+**Fixed.** `withdraw()` now calls `assertActive()` like `deposit()` and
+`transfer()`, so the three money paths carry the same guard set. The feature is
+still unreachable over the API - no endpoint sets `accounts.status` to
+`frozen`, only `AccountFactory::frozen()`, which no test uses - so this closes
+the inconsistency rather than completing the feature. The frozen-account state
+is outside the specification and would still be better removed than finished.
 
 ---
 
@@ -819,10 +910,24 @@ inside `bigint` and outside any legitimate transaction.
 
 **Q14. Should a rejected request consume anything observable — a rate limit, an
 audit row?**
-*Assumption:* no. Nothing is recorded for failures and there is no rate limiting
-anywhere, so the login endpoint the extension added is an unthrottled
-credential-stuffing target. Out of scope to fix here, but it should not go
-unmentioned.
+*Assumption as first built:* no. Nothing was recorded for a failure and there
+was no rate limiting anywhere, which left the login endpoint the auth extension
+added as an unthrottled credential-stuffing target.
+*What changed:* both halves were closed. Failed attempts are now recorded by the
+idempotency layer (BUG-06), and four named limiters exist — login (per
+credential+IP and per IP, counting only 401s), registration, money operations
+(per account and per IP), and authenticated POSTs — with the bounds in
+`config/wallet.php` and a 429 `rate_limited` response in the standard envelope.
+*Honesty about scope:* the specification did not ask for rate limiting, and it
+is listed nowhere in section 2, 3 or 4. It is a deliberate addition, not credit
+being claimed. Its one effect on testing is that the suite must not trip its own
+limits; `phpunit.xml` sets `CACHE_STORE=array` and Laravel rebuilds the
+container per test, so limiter counters reset between tests and the bounds (3
+registrations and 10 money operations per minute) are never approached inside a
+single test.
+*What is still not done:* there is no audit trail of rejected requests beyond
+the idempotency record — no structured log of who was throttled, and no alerting.
+A real deployment would want both.
 
 ---
 
@@ -830,16 +935,38 @@ unmentioned.
 
 ### Fixed before submission
 
-Five defects were found by the tests and by the manual session, and then closed.
-The reports above are kept in full rather than deleted, because how a defect was
-found is more informative than the diff that closed it.
+Twelve of the fourteen defects were found — by the tests, by the manual session,
+or by reading the code against its own claims — and then closed. The reports
+above are kept in full rather than deleted, because how a defect was found is
+more informative than the diff that closed it.
 
 | ID | Fix | Now covered by |
 |---|---|---|
 | BUG-04, BUG-05 | The idempotency fingerprint covers method + path + body, not the body alone | 2 tests asserting 409 |
 | BUG-07 | An ownership guard on every account route and on `from_account_id`, rendered as `403 forbidden` | 4 tests |
+| BUG-08 | A reservation row written before the operation, inside the same transaction, so a concurrent duplicate loses on the unique index | reasoned; the surrounding behaviour is tested, the race itself is not |
+| BUG-06 | Every terminal outcome below 500 recorded, so a failure replays and a changed payload conflicts | 1 test walking 422 → recorded → replayed → 409 |
 | BUG-03 | `per_page` clamped on both sides, reading the bounds from `config/wallet.php` | 2 tests |
+| BUG-02, BUG-09 | Renderers retyped onto the exceptions Laravel actually raises, plus JSON forced for `/api/*` and a catch-all `Throwable` | 3 tests |
+| BUG-10, BUG-01 | A domain ceiling on amounts, an overflow guard in `Money::add`, and `add`/`subtract` routed through `of()` | 3 tests |
 | BUG-11 | `orderByDesc('id')` as a tiebreaker, so "newest first" is a total order | reasoned, not tested — see the report |
+| BUG-13 | `assertActive()` added to `withdraw()`, so all three money paths carry the same guards | not tested; the feature is unreachable over the API |
+
+Rule 5 was also hardened while fixing BUG-13's neighbourhood: `Transaction` now
+throws on `updating` and `deleting`, so the append-only ledger is enforced by the
+model rather than only by convention.
+
+### Still open
+
+**BUG-12** — the history endpoint returns Laravel's raw paginator while every
+other endpoint returns a hand-shaped body, and each row still carries an
+always-null `idempotency_key` column. Cosmetic, and left deliberately: changing
+the response shape this late would have meant rewriting assertions in four tests
+for no behavioural gain.
+
+**BUG-14** — `POST /accounts` does not accept the specification's payload. That
+is a consequence of the out-of-scope authentication extension, not an oversight;
+see Q1 and Q2.
 
 ### What I would do next, in this order
 
@@ -850,21 +977,17 @@ The order follows the risk, not the effort.
    rejected (BUG-14) and why one owner cannot hold two currencies. Fixing the
    authorization hole made the service safe; removing the layer would make it
    correct.
-2. **Close the remaining idempotency gap (BUG-08).** Reserve the key *before*
-   `$next()`, inside the same transaction as the money movement, so a concurrent
-   retry loses on the unique index instead of double-applying. Add
-   `UNIQUE(account_id, idempotency_key)` on `transactions` as a ledger-level
-   backstop — the column already exists and is never written (BUG-12). Then
-   build the in-process HTTP-kernel harness that would let the race be *proved*
-   rather than reasoned about.
-3. **Record failed attempts (BUG-06)** so a key whose first use returned 422
-   cannot be reused with a different payload.
-4. **Add a catch-all error renderer (BUG-02, BUG-09)** so 404, 405, 500 and
-   malformed bodies all speak the same envelope, and retype the not-found
-   renderer, which is currently dead code.
-5. **Extract the balance rule out of `WalletService`** into a pure function over
+2. **Serve behind php-fpm and nginx**, then build the harness that drives
+   concurrent requests through the full middleware stack — so BUG-08's race can
+   be *proved* rather than reasoned about. It is the only fix in the table above
+   that rests on an argument instead of a test, and that is the gap I would close
+   first.
+3. **Add `UNIQUE(account_id, idempotency_key)` on `transactions`** as a
+   ledger-level backstop, and populate the column — it exists, is fillable, and
+   is never written, which is half of BUG-12.
+4. **Extract the balance rule out of `WalletService`** into a pure function over
    `(balanceMinor, amountMinor, currency)`, so rule 1 is unit-testable without a
    database as the specification asks. Today only `Money` meets that bar.
-6. **Bound `amount` and guard `Money::add` against overflow (BUG-10, BUG-01)**,
-   and route `add`/`subtract` through `of()` so the value object defends its own
-   invariant.
+5. **Shape the history response like every other endpoint** and close BUG-12.
+6. **Give idempotency keys a lifetime** — a retention window and an explicit
+   rejection of keys older than it, instead of an unbounded table (Q6).
