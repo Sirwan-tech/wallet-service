@@ -32,15 +32,16 @@ and `$_ENV`, while Laravel reads `$_SERVER` first, so the container's own
 `DB_HOST=db` won. The fix was matching `<server>` entries in `phpunit.xml`; the
 guard makes a regression loud instead of destructive.
 
-**Current state: 72 tests, 72 passing, 286 assertions.**
+**Current state: 85 tests, 85 passing, 312 assertions.**
 
 | Suite | File | Tests | What it covers |
 |---|---|---:|---|
 | Unit | `tests/Unit/MoneyTest.php` | 19 | The `Money` value object — no Laravel, no database |
+| Unit | `tests/Unit/BalanceRulesTest.php` | 13 | Deposit, withdrawal and transfer decisions — no Laravel, no database |
 | Feature | `tests/Feature/WalletServiceTest.php` | 4 | The balance rule at the service layer |
 | Feature | `tests/Feature/AccountApiTest.php` | 27 | Create / read / deposit / withdraw / history / ownership / error contract over HTTP |
 | Feature | `tests/Feature/TransferApiTest.php` | 10 | Transfers, atomicity, the currency rule, ownership |
-| Feature | `tests/Feature/IdempotencyTest.php` | 8 | Rule 4 in all its forms |
+| Feature | `tests/Feature/IdempotencyTest.php` | 9 | Rule 4 in all its forms |
 | Feature | `tests/Feature/ConcurrencyTest.php` | 3 | Rule 7, under real parallel load |
 
 **Twelve of the fourteen defects in section 4 were found and then fixed** before
@@ -73,22 +74,23 @@ and put the testing effort in that order.
 | 1 | **Money created or destroyed under concurrency** | Silent, unrecoverable, and invisible in the balance column — see §2.3. Two callers can both be told "success" while only one debit lands. | `ConcurrencyTest` (real parallel processes) |
 | 2 | **A retry applying an operation twice** | Network retries are routine; a double debit is a customer-visible loss the client cannot detect. | `IdempotencyTest` |
 | 3 | **A partial transfer** | One leg without the other corrupts the ledger permanently; every later reconciliation is wrong. | `TransferApiTest` — a rejected transfer must record *neither* leg |
-| 4 | **A negative balance** | The core invariant of the product. Cheap to test, catastrophic to miss. | `MoneyTest`, `WalletServiceTest`, `AccountApiTest` |
+| 4 | **A negative balance** | The core invariant of the product. Cheap to test, catastrophic to miss. | `MoneyTest`, `BalanceRulesTest`, `WalletServiceTest`, `AccountApiTest` |
 | 5 | **Authorization** | Any authenticated caller could read and drain any account (BUG-07) until it was fixed. This ranks below the ledger risks only because authentication was out of scope to begin with. | Found by hand (MT-22, MT-23); now covered by four tests |
 | 6 | **Error contract drift** | A client that cannot tell "insufficient funds" from "server exploded" will retry the wrong things. | `AccountApiTest`, `TransferApiTest` |
 | 7 | Pagination correctness | Wrong page boundaries mislead a human reading a statement, but no money moves. | `AccountApiTest` |
 
 ### 2.2 Choosing the level for each problem
 
-- **Unit, no database.** Everything that is pure arithmetic and invariants lives
-  in `App\Domain\Money`, and `MoneyTest` extends PHPUnit's own `TestCase` rather
-  than Laravel's. It boots no framework and touches no database, which is the
-  specification's requirement that business logic be testable without a live
-  database. This suite runs in well under a second.
-- **Service level, real database.** `WalletServiceTest` exercises the balance
-  rule where it actually lives — inside `DB::transaction()` with a row lock.
-  This cannot be done without a database, and mocking it would test the mock
-  rather than the locking.
+- **Unit, no database.** `App\Domain\Money` holds the arithmetic invariants, and
+  `App\Domain\BalanceRules` holds the deposit, withdrawal and transfer decisions.
+  `MoneyTest` and `BalanceRulesTest` extend PHPUnit's own `TestCase`, boot no
+  framework and touch no database. This is the specification's requested proof
+  that the core business rules are testable without a live database, and it runs
+  in well under a second.
+- **Service level, real database.** `WalletServiceTest` exercises the persistence
+  shell around those rules — `DB::transaction()`, row locks, saved balances and
+  ledger rows. Those properties cannot be proven by a unit test, and mocking
+  them would test the mock rather than MySQL.
 - **HTTP, real database.** Everything a client can observe — status code, error
   envelope, response body, and the resulting database state — is tested through
   the real endpoints. Assertions check the body and the ledger, never just
@@ -1007,9 +1009,6 @@ The order follows the risk, not the effort.
 3. **Add `UNIQUE(account_id, idempotency_key)` on `transactions`** as a
    ledger-level backstop, and populate the column — it exists, is fillable, and
    is never written, which is half of BUG-12.
-4. **Extract the balance rule out of `WalletService`** into a pure function over
-   `(balanceMinor, amountMinor, currency)`, so rule 1 is unit-testable without a
-   database as the specification asks. Today only `Money` meets that bar.
-5. **Shape the history response like every other endpoint** and close BUG-12.
-6. **Give idempotency keys a lifetime** — a retention window and an explicit
+4. **Shape the history response like every other endpoint** and close BUG-12.
+5. **Give idempotency keys a lifetime** — a retention window and an explicit
    rejection of keys older than it, instead of an unbounded table (Q6).

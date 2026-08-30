@@ -63,7 +63,7 @@ docker compose up -d --wait db_test
 docker compose run --rm app php artisan test
 ```
 
-**72 tests, all passing.** They run against a real MySQL 8 database in a
+**85 tests, all passing.** They run against a real MySQL 8 database in a
 dedicated `db_test` container, from a clean checkout, with no seeded data and no
 dependence on execution order. See [TESTING.md](TESTING.md) for the plan, the
 manual test session, and the open defects.
@@ -138,8 +138,15 @@ starting with a letter or digit. A UUID satisfies this.
 **Money is an integer, and a value object.** `App\Domain\Money` holds an `int`
 of minor units and an uppercase 3-letter code. It is immutable and `readonly`,
 its constructor is private, and arithmetic between different currencies throws.
-Because it depends on nothing, the arithmetic and boundary rules are unit-tested
+Because it depends on nothing, its arithmetic and boundary rules are unit-tested
 with no framework and no database — 19 tests that run in well under a second.
+
+**Balance decisions are pure.** `App\Domain\BalanceRules` accepts immutable
+`Money` values and decides deposits, withdrawals and transfers without Laravel,
+configuration or a database. Its 13 plain-PHP tests cover credits, overdrafts,
+exact-balance boundaries, currency mismatches, transfer conservation and rejected
+operations. `WalletService` is now the persistence shell: it locks rows, calls
+the rules, saves the resulting balances and writes the ledger.
 
 **Balances change only inside a locked transaction.** Every money operation in
 `App\Services\WalletService` opens a `DB::transaction()` and re-reads the account
@@ -180,14 +187,16 @@ formatting.
 ```
 app/
   Domain/Money.php              value object: integer minor units, currency rules
-  Services/WalletService.php    deposit / withdraw / transfer, locking, ledger writes
+  Domain/BalanceRules.php       pure deposit / withdraw / transfer decisions
+  Services/WalletService.php    locking, persistence and ledger writes
   Http/Middleware/HandleIdempotency.php
   Http/Controllers/            thin: validate, delegate, present
   Exceptions/                  InsufficientFunds, CurrencyMismatch, AccountFrozen, NotAccountOwner
   Http/Middleware/ApiSecurityHeaders.php
 config/wallet.php              currencies, pagination bounds, amount ceiling, rate limits
 tests/
-  Unit/MoneyTest.php           no framework, no database
+  Unit/MoneyTest.php            money arithmetic, no framework or database
+  Unit/BalanceRulesTest.php     balance decisions, no framework or database
   Feature/                     HTTP + real MySQL, plus the concurrency suite
   Support/concurrent_operation.php   one wallet operation per OS process
 ```
@@ -274,13 +283,11 @@ the API).
 
 ## Trade-offs accepted
 
-**Business logic still needs a database to test.** Only `Money` is genuinely
-framework-free. The balance rule lives inside `WalletService`, wrapped in
-`DB::transaction()` with a row lock, so rule 1 cannot be asserted without a live
-database. Mocking it would have tested the mock rather than the locking, so I
-chose an honest integration test over a hollow unit test — but the specification
-asks for business logic testable without a database, and today only the value
-object meets that bar.
+**Balance decisions and persistence need different tests.** `BalanceRules` is
+framework-free, so the balance, overdraft and currency decisions are unit-tested
+without a database. `WalletService` stays database-bound deliberately: row locks,
+transactions and ledger writes must be proven against real MySQL rather than a
+mock. The two layers are tested separately for the risks they actually own.
 
 **The concurrency suite is slow.** It spawns sixteen OS processes across three
 tests, each booting Laravel, and adds about thirty seconds to the run. A faster
@@ -337,15 +344,10 @@ In this order, because this is the order in which the risk falls.
 3. **Add `UNIQUE(account_id, idempotency_key)` on `transactions`** as a
    ledger-level backstop, and populate the column — it exists, is fillable, and
    is never written, which is half of BUG-12.
-4. **Extract the balance rule into a pure function** over
-   `(balanceMinor, amountMinor, currency)`, so rule 1 is unit-testable with no
-   database and `WalletService` becomes a thin persistence shell around it. Today
-   only `Money` meets the specification's "testable without a live database" bar,
-   and that is the weakest point in the Structure of this submission.
-5. **Shape the history response like every other endpoint** and finish BUG-12.
-6. **Give idempotency keys a lifetime** — a retention window and an explicit
+4. **Shape the history response like every other endpoint** and finish BUG-12.
+5. **Give idempotency keys a lifetime** — a retention window and an explicit
    rejection of keys older than it, instead of an unbounded table.
-7. **Add a per-currency minor-unit exponent.** `1000` means $10.00 in USD and
+6. **Add a per-currency minor-unit exponent.** `1000` means $10.00 in USD and
    1000 IQD, and nothing in the schema records which. Nothing renders a balance
    today, so it does not bite yet; the moment anything does, it will.
 

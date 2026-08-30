@@ -2,17 +2,19 @@
 
 namespace App\Services;
 
+use App\Domain\BalanceRules;
 use App\Domain\Money;
 use App\Exceptions\AccountFrozenException;
-use App\Exceptions\CurrencyMismatchException;
-use App\Exceptions\InsufficientFundsException;
 use App\Models\Account;
 use App\Models\Transaction;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class WalletService
 {
+    public function __construct(private BalanceRules $rules) {}
+
     /** Credit an account and record the operation atomically. */
     public function deposit(string $accountId, int $amount): Transaction
     {
@@ -23,8 +25,10 @@ class WalletService
 
             $this->assertActive($account);
 
-            $money = Money::of($account->balance, $account->currency)
-                ->add(Money::of($amount, $account->currency));
+            $money = $this->rules->deposit(
+                Money::of($account->balance, $account->currency),
+                $amount,
+            );
 
             $account->balance = $money->minorUnits;
             $account->save();
@@ -43,14 +47,10 @@ class WalletService
 
             $this->assertActive($account);
 
-            $balance = Money::of($account->balance, $account->currency);
-            $debit = Money::of($amount, $account->currency);
-
-            if ($debit->isGreaterThan($balance)) {
-                throw new InsufficientFundsException();
-            }
-
-            $account->balance = $balance->subtract($debit)->minorUnits;
+            $account->balance = $this->rules->withdraw(
+                Money::of($account->balance, $account->currency),
+                $amount,
+            )->minorUnits;
             $account->save();
 
             return $this->record($account, 'withdrawal', $amount, $account->balance);
@@ -67,9 +67,7 @@ class WalletService
     {
         $this->assertValidAmount($amount);
 
-        if ($fromId === $toId) {
-            throw new \InvalidArgumentException('Cannot transfer to the same account.');
-        }
+        $this->rules->assertDifferentAccounts($fromId, $toId);
 
         return DB::transaction(function () use ($fromId, $toId, $amount) {
             // Acquire locks one row at a time in one explicit order. A single
@@ -81,8 +79,8 @@ class WalletService
             foreach ($ids as $id) {
                 $account = Account::whereKey($id)->lockForUpdate()->first();
 
-                if (!$account) {
-                    throw new \Illuminate\Database\Eloquent\ModelNotFoundException();
+                if (! $account) {
+                    throw new ModelNotFoundException;
                 }
 
                 $locked[$id] = $account;
@@ -94,24 +92,21 @@ class WalletService
             $this->assertActive($from);
             $this->assertActive($to);
 
-            if ($from->currency !== $to->currency) {
-                throw new CurrencyMismatchException($from->currency, $to->currency);
-            }
-
-            $fromBalance = Money::of($from->balance, $from->currency);
-            $debit = Money::of($amount, $from->currency);
-
-            if ($debit->isGreaterThan($fromBalance)) {
-                throw new InsufficientFundsException();
-            }
+            $balances = $this->rules->transfer(
+                $fromId,
+                Money::of($from->balance, $from->currency),
+                $toId,
+                Money::of($to->balance, $to->currency),
+                $amount,
+            );
 
             $transferId = (string) Str::uuid();
 
-            $from->balance = $fromBalance->subtract($debit)->minorUnits;
+            $from->balance = $balances['from']->minorUnits;
             $from->save();
             $out = $this->record($from, 'transfer_out', $amount, $from->balance, $transferId);
 
-            $to->balance = Money::of($to->balance, $to->currency)->add($debit)->minorUnits;
+            $to->balance = $balances['to']->minorUnits;
             $to->save();
             $in = $this->record($to, 'transfer_in', $amount, $to->balance, $transferId);
 
@@ -122,7 +117,7 @@ class WalletService
     private function assertActive(Account $account): void
     {
         if ($account->isFrozen()) {
-            throw new AccountFrozenException();
+            throw new AccountFrozenException;
         }
     }
 
